@@ -26,11 +26,11 @@ local Stats            = game:GetService("Stats")
 local VirtualUser      = game:GetService("VirtualUser")
 
 local LP = Players.LocalPlayer
-local VERSION = "6.0"
+local VERSION = "7.1"
 local isMobile = UserInputService.TouchEnabled and not UserInputService.KeyboardEnabled
 
 local P = {
-	State = {}, Conns = {}, Actions = {}, Cool = {}, Pages = {}, Nav = {},
+	State = {}, Conns = {}, Actions = {}, Cool = {}, Pages = {}, Nav = {}, Stuck = {}, Skip = {},
 	Stats = { actions = 0, sells = 0, items = 0, start = os.clock() },
 	Cfg = {}, W = { parts = {}, prompts = {}, t = 0, pt = 0 }, LastWarn = {},
 }
@@ -42,7 +42,7 @@ _G.GardenProX = P
 local Cfg = {
 	Speed = 55, Jump = 120, FlySpeed = 90, Range = 4000,
 	Reach = 8, Delay = 0.05, Humanize = true, Jitter = 0.25, Turbo = false,
-	ESP = false, Radar = true, AntiAfk = true, LowPower = false,
+	ESP = false, Radar = true, AntiAfk = true, LowPower = false, TryAll = true,
 	SellEvery = 4, PromptCd = 0.6, ReachExtra = 0,
 }
 P.Cfg = Cfg
@@ -51,7 +51,7 @@ P.Cfg = Cfg
 -- หมวด prompt (อังกฤษ + ไทย)
 --------------------------------------------------------------------------------
 local CAT = {
-	harvest = { label = "เก็บเกี่ยว", words = { "harvest", "pick", "collect", "gather", "reap", "เก็บ", "เกี่ยว" }, col = Color3.fromRGB(110, 230, 150) },
+	harvest = { label = "เก็บเกี่ยว", words = { "harvest", "pick", "collect", "gather", "reap", "crop", "fruit", "ripe", "ready", "เก็บ", "เกี่ยว", "สุก" }, col = Color3.fromRGB(110, 230, 150) },
 	plant   = { label = "ปลูก",      words = { "plant", "sow", "ปลูก", "seed" }, col = Color3.fromRGB(150, 220, 110) },
 	water   = { label = "รดน้ำ",     words = { "water", "รด" }, col = Color3.fromRGB(110, 190, 255) },
 	mine    = { label = "ขุด/เหมือง", words = { "mine", "dig", "ขุด", "ore", "rock" }, col = Color3.fromRGB(170, 200, 230) },
@@ -60,12 +60,14 @@ local CAT = {
 	egg     = { label = "ฟักไข่",     words = { "hatch", "egg", "ฟัก" }, col = Color3.fromRGB(250, 220, 130) },
 	pet     = { label = "สัตว์เลี้ยง", words = { "feed", "pet", "ให้อาหาร", "เลี้ยง" }, col = Color3.fromRGB(255, 170, 210) },
 	sell    = { label = "ขายของ",    words = { "sell", "ขาย" }, col = Color3.fromRGB(255, 200, 90) },
-	buy     = { label = "ซื้อของ",    words = { "buy", "purchase", "ซื้อ" }, col = Color3.fromRGB(255, 150, 120) },
+	buy     = { label = "ซื้อของ",    words = { "buy", "purchase", "shop", "stall", "merchant", "store", "ซื้อ", "ร้าน" }, col = Color3.fromRGB(255, 150, 120) },
 	claim   = { label = "รับรางวัล",  words = { "claim", "reward", "daily", "gift", "spin", "รับ", "รางวัล" }, col = Color3.fromRGB(190, 150, 255) },
 	craft   = { label = "คราฟ/อัปเกรด", words = { "craft", "forge", "upgrade", "enchant", "คราฟ", "อัปเกรด" }, col = Color3.fromRGB(150, 190, 255) },
 	talk    = { label = "คุย/NPC",   words = { "talk", "speak", "คุย", "dialog" }, col = Color3.fromRGB(200, 200, 210) },
 }
 local CAT_ORDER = { "harvest", "plant", "water", "mine", "chop", "fish", "egg", "pet", "sell", "buy", "claim", "craft", "talk" }
+-- ลำดับการเดาหมวด: ตัวที่เฉพาะเจาะจงก่อน (กัน 'Buy Seed' ถูกอ่านเป็นปลูก)
+local MATCH_ORDER = { "sell", "buy", "claim", "water", "plant", "harvest", "egg", "pet", "mine", "chop", "fish", "craft", "talk" }
 
 -- คำไว้หาวัตถุเมื่อหมวดนั้นไม่มี prompt (ใช้ไอเทม/แตะแทน)
 local PART_WORDS = {
@@ -193,8 +195,16 @@ local function promptText(prompt)
 end
 
 local function catOfPrompt(prompt)
+	-- ชั้น 1: ดู ActionText ก่อน (แม่นสุด)
+	local act = (prompt.ActionText or ""):lower()
+	if act ~= "" then
+		for _, cat in ipairs(MATCH_ORDER) do
+			if hit(act, CAT[cat].words) then return cat end
+		end
+	end
+	-- ชั้น 2: ดูทั้งสาย (ActionText + ObjectText + ชื่อวัตถุ/โฟลเดอร์)
 	local txt = promptText(prompt)
-	for _, cat in ipairs(CAT_ORDER) do
+	for _, cat in ipairs(MATCH_ORDER) do
 		if hit(txt, CAT[cat].words) then return cat end
 	end
 	return nil
@@ -241,8 +251,11 @@ end
 local function nearestPrompt(cat, maxD)
 	local _, prompts = world()
 	local my = hrp(); if not my then return nil end
+	P.Skip = P.Skip or {}
 	for _, e in ipairs(prompts) do
-		if e.cat == cat then
+		local key = e.prompt or e.click
+		local sk = P.Skip[key]
+		if e.cat == cat and not (sk and os.clock() < sk) then
 			local d = dist(e.part.Position, my.Position)
 			if d <= (maxD or Cfg.Range) then return e, d end
 		end
@@ -419,12 +432,30 @@ local function catStep(cat, prio, fallbackTool)
 		local e = nearestPrompt(cat)
 		if e then
 			local reach = math.min(tonumber(e.prompt and e.prompt.MaxActivationDistance) or 10, 20) - 1
+			local key = e.prompt or e.click
+			local st = P.Stuck[key]
+			if not st or st.part ~= e.part then
+				st = { part = e.part, since = os.clock(), n = 0 }
+				P.Stuck[key] = st
+			elseif (st.n or 0) >= 6 and os.clock() - st.since > 4 then
+				P.Skip[key] = os.clock() + 6
+				P.Stuck[key] = nil
+				warnOnce("sk" .. tostring(cat), "เป้านี้กดแล้วไม่เกิดผล ข้าม 6 วิ (" .. CAT[cat].label .. ")")
+				return
+			end
 			if walkTo(e.part.Position, math.max(reach, 3)) then
-				local last = P.Cool[e.prompt or e.click] or 0
+				local last = P.Cool[key] or 0
 				if os.clock() - last < Cfg.PromptCd then return end
-				P.Cool[e.prompt or e.click] = os.clock()
+				P.Cool[key] = os.clock()
+				st.n = (st.n or 0) + 1
 				aim(e.part.Position)
 				firePrompt(e)
+				if Cfg.TryAll then
+					touchPart(e.part)
+					local tw2 = TOOL_WORDS[cat]
+					if tw2 and equip(tw2) then useTool(1, 0.1) end
+					clickScreen(e.part.Position)
+				end
 				P.Stats.actions += 1
 				if cat == "sell" then P.Stats.sells += 1 end
 			else
@@ -473,6 +504,514 @@ local function lootStep()
 	end
 end
 register("Auto_loot", 60, lootStep, "เก็บของตก")
+
+--------------------------------------------------------------------------------
+-- RE MODULE : แกะแมพจริง (โครงสร้าง / ปุ่ม / remote / ไบต์โค้ด / GUI) + เรียนจากการเล่น
+--------------------------------------------------------------------------------
+local RE = { report = "", rules = {}, events = {}, promptLog = {}, learning = false, hooked = {} }
+P.RE = RE
+
+local function fp(inst)
+	local parts, cur, guard = {}, inst, 0
+	while cur and cur ~= game and guard < 9 do
+		table.insert(parts, 1, cur.Name)
+		cur = cur.Parent
+		guard += 1
+	end
+	return table.concat(parts, ".")
+end
+local function short(s, n)
+	s = tostring(s or "")
+	if #s > (n or 60) then return s:sub(1, n or 60) .. "…" end
+	return s
+end
+local function argSer(v)
+	local t = typeof(v)
+	if t == "Instance" then return v.ClassName .. "[" .. short(fp(v), 44) .. "]" end
+	if t == "table" then
+		local n, keys = 0, {}
+		for k in pairs(v) do n += 1; if n <= 4 then keys[#keys + 1] = tostring(k) end end
+		return ("{%d:%s}"):format(n, table.concat(keys, ","))
+	end
+	if t == "string" then return ("%q"):format(short(v, 34)) end
+	if t == "Vector3" then return ("V3(%.1f,%.1f,%.1f)"):format(v.X, v.Y, v.Z) end
+	if t == "CFrame" then local q = v.Position; return ("CF(%.1f,%.1f,%.1f)"):format(q.X, q.Y, q.Z) end
+	return tostring(v)
+end
+
+local function allRemotes()
+	local list, seen = {}, {}
+	local function scan(root)
+		for _, d in ipairs(root:GetDescendants()) do
+			if (d:IsA("RemoteEvent") or d:IsA("RemoteFunction") or d:IsA("UnreliableRemoteEvent")) and not seen[d] then
+				seen[d] = true
+				list[#list + 1] = d
+			end
+		end
+	end
+	pcall(scan, ReplicatedStorage)
+	pcall(scan, Workspace)
+	return list
+end
+
+local function recordRemote(kind, remote, args)
+	if not RE.learning then return end
+	local ser, inst = {}, nil
+	for i = 1, math.min(#args, 6) do
+		ser[#ser + 1] = argSer(args[i])
+		if not inst and typeof(args[i]) == "Instance" then inst = args[i] end
+	end
+	RE.events[#RE.events + 1] = { t = os.clock(), name = fp(remote), kind = kind,
+		args = table.concat(ser, ", "), inst = inst, n = #args }
+end
+
+local function hookRemotes()
+	local count = 0
+	for _, r in ipairs(allRemotes()) do
+		if not RE.hooked[r] then
+			RE.hooked[r] = true
+			local key = r:IsA("RemoteFunction") and "InvokeServer" or "FireServer"
+			local ok = pcall(function()
+				local orig = r[key]
+				if not orig then return end
+				if hookfunction then
+					local h
+					h = hookfunction(orig, function(self, ...)
+						recordRemote(key, r, { ... })
+						return h(self, ...)
+					end)
+				else
+					r[key] = function(self, ...)
+						recordRemote(key, r, { ... })
+						return orig(self, ...)
+					end
+				end
+			end)
+			if ok then count += 1 end
+		end
+	end
+	RE.hooks = count
+	return count
+end
+
+local function hookPrompts()
+	conn(game:GetService("ProximityPromptService").PromptTriggered, function(prompt)
+		if not RE.learning then return end
+		RE.promptLog[#RE.promptLog + 1] = {
+			t = os.clock(), kind = "Prompt",
+			text = tostring(prompt.ActionText) .. " | " .. tostring(prompt.ObjectText),
+			path = fp(prompt), part = prompt.Parent,
+		}
+	end)
+	for _, d in ipairs(Workspace:GetDescendants()) do
+		if d:IsA("ClickDetector") and not RE.hooked[d] then
+			RE.hooked[d] = true
+			conn(d.MouseClick, function()
+				if not RE.learning then return end
+				RE.promptLog[#RE.promptLog + 1] = { t = os.clock(), kind = "Click", text = d.Name, path = fp(d), part = d.Parent }
+			end)
+		end
+	end
+end
+
+local function relateTarget(promptPart, inst)
+	if not promptPart or not inst then return 0 end
+	local cur, lvl = promptPart, 0
+	while cur and lvl < 6 do
+		if cur == inst then return lvl end
+		cur, lvl = cur.Parent, lvl + 1
+	end
+	return 0
+end
+
+local function learnBuild()
+	local rules, seenRule = {}, {}
+	for _, p in ipairs(RE.promptLog) do
+		local best, bd = nil, 9
+		for _, e in ipairs(RE.events) do
+			local dt = e.t - p.t
+			if dt > -0.7 and dt < 1.0 and math.abs(dt) < bd then best, bd = e, math.abs(dt) end
+		end
+		local key = p.text .. (best and ("→" .. best.name) or "")
+		if not seenRule[key] then
+			seenRule[key] = true
+			rules[#rules + 1] = {
+				text = p.text, kind = p.kind, remote = best and best.name or nil,
+				args = best and best.args or "", nargs = best and best.n or 0,
+				lvl = best and relateTarget(p.part, best.inst) or 0,
+			}
+		end
+	end
+	RE.rules = rules
+	return #rules
+end
+
+local function resolveRemote(path)
+	local parts = {}
+	for seg in tostring(path):gmatch("[^%.]+") do parts[#parts + 1] = seg end
+	local cur = game
+	for _, seg in ipairs(parts) do
+		cur = cur and cur:FindFirstChild(seg)
+		if not cur then return nil end
+	end
+	return cur
+end
+
+local function fireRule(rule, entry)
+	if not entry or not entry.part then return false end
+	local remote = rule.remote and resolveRemote(rule.remote)
+	if remote and (remote:IsA("RemoteEvent") or remote:IsA("UnreliableRemoteEvent")) then
+		local target = entry.part
+		if rule.lvl and rule.lvl > 0 then
+			local cur = entry.part
+			for _ = 1, rule.lvl do if cur and cur.Parent then cur = cur.Parent end end
+			target = cur or entry.part
+		end
+		local args = {}
+		if (rule.nargs or 0) >= 1 then args[1] = target end
+		local ok = pcall(function() remote:FireServer(unpack(args)) end)
+		return ok
+	end
+	return firePrompt(entry)
+end
+
+local function findPromptByText(text)
+	local _, prompts = world()
+	local my = hrp()
+	if not my then return nil end
+	local want = tostring(text):lower()
+	for _, e in ipairs(prompts) do
+		local t = (tostring(e.prompt and e.prompt.ActionText or "") .. " | " .. tostring(e.prompt and e.prompt.ObjectText or e.text)):lower()
+		if t == want then return e, dist(e.part.Position, my.Position) end
+	end
+	for _, e in ipairs(prompts) do
+		local t = (e.text or ""):lower()
+		if want ~= "" and (want:find(t, 1, true) or t:find(want, 1, true)) then return e, dist(e.part.Position, my.Position) end
+	end
+	return nil
+end
+P.FindPromptByText = findPromptByText
+
+function RE.learn(on)
+	RE.learning = on
+	if on then
+		RE.events, RE.promptLog = {}, {}
+		local n = hookRemotes()
+		hookPrompts()
+		log(("บันทึกอยู่ • hook remote %d ตัว — เล่นเองตามปกติ"):format(n), "ok")
+		toast("บันทึกอยู่: เล่นเอง 1-2 นาที (เก็บเกี่ยว/ขุด/ขาย/ฟักไข่)", T.gold)
+	else
+		log(("หยุดบันทึก • prompt %d • remote %d"):format(#RE.promptLog, #RE.events), "ok")
+	end
+end
+
+function RE.Save(txt)
+	local name = "GardenProX_RE.txt"
+	local bases = {}
+	if RE.SaveDir and #RE.SaveDir > 2 then
+		local d = RE.SaveDir
+		if d:sub(-1) ~= "/" then d = d .. "/" end
+		bases[#bases + 1] = d
+	end
+	for _, b in ipairs({ "/storage/emulated/0/Download/", "/sdcard/Download/",
+		"/storage/emulated/0/Documents/", "/storage/emulated/0/Delta/workspace/", "" }) do
+		bases[#bases + 1] = b
+	end
+	local done, best = {}, nil
+	for _, base in ipairs(bases) do
+		local target = base .. name
+		local ok = pcall(writefile, target, txt)
+		local exists = false
+		if ok and isfile then
+			local ok2, res = pcall(isfile, target)
+			exists = (ok2 and res == true)
+		end
+		local good = ok and (exists or not isfile)
+		local shown = (target == name) and ("workspace/" .. name) or target
+		done[#done + 1] = { path = shown, ok = good }
+		if good then
+			best = shown
+			break
+		end
+	end
+	for _, d in ipairs(done) do
+		log((d.ok and "เซฟได้: " or "เขียนไม่ได้: ") .. d.path, d.ok and "ok" or "warn")
+	end
+	if best then
+		toast("เซฟไฟล์ที่ " .. best, T.accent)
+	else
+		toast("เขียนไฟล์ไม่ได้ทุกที่ — ใช้คลิปบอร์ด/F9 แทน", T.gold)
+	end
+	RE.LastSaved = best
+	return best, done
+end
+
+function RE.Build(silent)
+	local out, cnt = {}, 0
+	local function L(fmt, ...)
+		cnt += 1
+		if cnt > 1400 then return end
+		local ok, s2 = pcall(string.format, fmt, ...)
+		out[#out + 1] = ok and s2 or tostring(fmt)
+	end
+	L("=== GardenProX RE v%s ===", VERSION)
+	L("place=%s player=%s mobile=%s", game.PlaceId, LP.Name, tostring(isMobile))
+	local okDesc, descCount = pcall(function() return #Workspace:GetDescendants() end)
+	L("streaming=%s workspaceChildren=%d descendants=%s gravity=%.0f", tostring(Workspace.StreamingEnabled),
+		#Workspace:GetChildren(), tostring(okDesc and descCount or "?"), Workspace.Gravity)
+
+	L("")
+	L("## 1) กระเป๋า / ไอเท็ม / ค่าเงิน")
+	local tools = {}
+	for _, box in ipairs({ LP:FindFirstChild("Backpack"), char() }) do
+		if box then for _, x in ipairs(box:GetChildren()) do if x:IsA("Tool") then tools[#tools + 1] = x.Name end end end
+	end
+	L("tools=%d : %s", #tools, table.concat(tools, " , "))
+	local ls = LP:FindFirstChild("leaderstats")
+	if ls then
+		for _, v in ipairs(ls:GetChildren()) do L("  leaderstat %s = %s", v.Name, tostring(v.Value)) end
+	end
+	local pa = {}
+	for k, v in pairs(LP:GetAttributes()) do pa[#pa + 1] = k .. "=" .. tostring(v) end
+	if #pa > 0 then L("  playerAttrs: %s", table.concat(pa, ", ")) end
+
+	L("")
+	L("## 2) โครงสร้าง Workspace")
+	local tops = {}
+	for _, c in ipairs(Workspace:GetChildren()) do
+		if c ~= char() and not c:IsA("Camera") and not c:IsA("Terrain") then
+			local n = #c:GetChildren()
+			tops[#tops + 1] = ("%s<%s>%s"):format(c.Name, c.ClassName, n > 0 and ("(" .. n .. ")") or "")
+		end
+	end
+	L("%s", table.concat(tops, "  |  "))
+	local shown = 0
+	for _, c in ipairs(Workspace:GetChildren()) do
+		if (c:IsA("Folder") or c:IsA("Model")) and shown < 30 then
+			shown += 1
+			local kids = {}
+			for i, k in ipairs(c:GetChildren()) do
+				if i > 14 then kids[#kids + 1] = "…" break end
+				kids[#kids + 1] = ("%s<%s>"):format(k.Name, k.ClassName)
+			end
+			L("  %s<%s> → %s", c.Name, c.ClassName, table.concat(kids, ", "))
+		end
+	end
+
+	L("")
+	L("## 2b) โครงสร้างลึก (ถึง 5 ชั้น, เฉพาะสิ่งที่มีความหมาย)")
+	local deepN = 0
+	local function showable(c)
+		if c:IsA("Model") or c:IsA("Folder") or c:IsA("Tool") or c:IsA("ProximityPrompt") or c:IsA("ClickDetector") then
+			return true
+		end
+		if c:IsA("BasePart") then
+			return (c:FindFirstChildOfClass("ProximityPrompt") or c:FindFirstChildOfClass("ClickDetector")) ~= nil
+		end
+		return false
+	end
+	local function walkTree(inst, depth)
+		if deepN > 200 or not inst then return end
+		for _, c in ipairs(inst:GetChildren()) do
+			if deepN > 200 then return end
+			if c ~= char() then
+				if showable(c) then
+					local keys = {}
+					for k in pairs(c:GetAttributes()) do keys[#keys + 1] = k end
+					local extra = ""
+					if #keys > 0 then
+						table.sort(keys)
+						extra = " {" .. table.concat(keys, ",") .. "}"
+					end
+					L("%s%s<%s>%s", string.rep("  ", depth), c.Name, c.ClassName, extra)
+					deepN += 1
+					if depth < 5 then walkTree(c, depth + 1) end
+				elseif c:IsA("BasePart") or c:IsA("Terrain") then
+					-- ข้ามของตกแต่ง
+				else
+					if depth < 5 then walkTree(c, depth) end
+				end
+			end
+		end
+	end
+	pcall(walkTree, Workspace, 0)
+	L("  (แสดง %d บรรทัด)", deepN)
+
+	L("")
+	L("## 3) ProximityPrompt / ClickDetector")
+	local prompts, clicks = {}, {}
+	for _, d in ipairs(Workspace:GetDescendants()) do
+		if d:IsA("ProximityPrompt") then prompts[#prompts + 1] = d
+		elseif d:IsA("ClickDetector") then clicks[#clicks + 1] = d end
+	end
+	L("พบ %d prompt • %d clickdetector", #prompts, #clicks)
+	for i, p in ipairs(prompts) do
+		if i > 90 then L("  … อีก %d", #prompts - 90) break end
+		L("  [%d] A=%q O=%q hold=%.2f dist=%.0f los=%s <- %s", i, short(p.ActionText, 18), short(p.ObjectText, 18),
+			tonumber(p.HoldDuration) or 0, tonumber(p.MaxActivationDistance) or 0,
+			tostring(p.RequiresLineOfSight), fp(p))
+	end
+	for i, c in ipairs(clicks) do
+		if i > 30 then L("  … อีก %d", #clicks - 30) break end
+		L("  click[%d] %q <- %s", i, short(c.Name, 20), fp(c))
+	end
+
+	L("")
+	L("## 4) Remote")
+	local remotes = allRemotes()
+	L("พบ %d ตัว", #remotes)
+	for i, r in ipairs(remotes) do
+		if i > 90 then L("  … อีก %d", #remotes - 90) break end
+		local nc = -1
+		if getconnections then
+			local ok, c = pcall(getconnections, r.OnClientEvent or r.OnClientInvoke)
+			if ok and type(c) == "table" then nc = #c end
+		end
+		L("  %s <%s>%s", fp(r), r.ClassName, nc >= 0 and (" handlers=" .. nc) or "")
+	end
+
+	L("")
+	L("## 5) สคริปต์ที่มองเห็น")
+	local seenS = {}
+	for _, root in ipairs({ ReplicatedStorage, Workspace }) do
+		for _, d in ipairs(root:GetDescendants()) do
+			if d:IsA("LuaSourceContainer") and not seenS[d] then
+				seenS[d] = true
+				L("  %s <%s>", fp(d), d.ClassName)
+			end
+		end
+	end
+
+	L("")
+	L("## 6) คำในไบต์โค้ด")
+	if getscriptbytecode and getscripts then
+		local bag, order = {}, {}
+		local okAll, scripts = pcall(getscripts)
+		if okAll and type(scripts) == "table" then
+			for _, sc in ipairs(scripts) do
+				local ok, bc = pcall(getscriptbytecode, sc)
+				if ok and type(bc) == "string" then
+					for w in bc:gmatch("[%a_][%w_]+") do
+						if #w >= 4 and #w <= 30 and not bag[w] then bag[w] = true; order[#order + 1] = w end
+					end
+				end
+			end
+		end
+		local KW = { "seed", "crop", "plant", "harvest", "water", "sell", "buy", "coin", "cash", "money", "egg",
+			"hatch", "pet", "animal", "mine", "ore", "rock", "cave", "tree", "wood", "axe", "pick", "fish", "rod",
+			"quest", "craft", "enchant", "upgrade", "tool", "inventory", "plot", "farm", "grow", "garden", "hit",
+			"attack", "monster", "mob", "level", "exp", "gem", "shop", "daily", "starter" }
+		local hits = {}
+		for _, w in ipairs(order) do
+			local lw = w:lower()
+			for _, k in ipairs(KW) do
+				if lw:find(k, 1, true) then hits[#hits + 1] = w break end
+			end
+		end
+		L("scripts=%d words=%d interesting=%d", okAll and #scripts or 0, #order, #hits)
+		L("%s", table.concat(hits, " ", 1, math.min(#hits, 500)))
+	else
+		L("(executor ไม่รองรับ getscriptbytecode)")
+	end
+
+	L("")
+	L("## 7) ข้อความใน GUI")
+	local texts, seenT = {}, {}
+	for _, d in ipairs((LP:FindFirstChildOfClass("PlayerGui") or gui):GetDescendants()) do
+		if d:IsA("TextLabel") or d:IsA("TextButton") then
+			local tx = (d.Text or ""):gsub("%s+", " ")
+			if #tx >= 3 and #tx <= 40 and not seenT[tx] then seenT[tx] = true; texts[#texts + 1] = tx end
+		end
+	end
+	L("%s", table.concat(texts, " | ", 1, math.min(#texts, 120)))
+
+	L("")
+	L("## 9) attribute/tag ของวัตถุที่มีปุ่ม (ใช้แยกเจ้าของ/Rarity)")
+	local CS = game:GetService("CollectionService")
+	for i = 1, math.min(#prompts, 12) do
+		local p = prompts[i]
+		local obj, lvl = p.Parent, 0
+		L("  [%d] %s  A=%q O=%q", i, fp(obj), short(p.ActionText, 14), short(p.ObjectText, 14))
+		while obj and lvl < 3 do
+			local at = {}
+			for k, v in pairs(obj:GetAttributes()) do at[#at + 1] = tostring(k) .. "=" .. short(tostring(v), 18) end
+			local tags = {}
+			pcall(function() tags = CS:GetTags(obj) end)
+			if #at > 0 or #tags > 0 then
+				L("     %s<%s> attr[%s] tag[%s]", obj.Name, obj.ClassName, table.concat(at, ","), table.concat(tags, ","))
+			end
+			obj, lvl = obj.Parent, lvl + 1
+		end
+	end
+
+	L("")
+	L("## 8) ที่บันทึกไว้")
+	L("promptEvents=%d remoteEvents=%d rules=%d", #RE.promptLog, #RE.events, #RE.rules)
+	for i, p in ipairs(RE.promptLog) do
+		if i > 60 then L("  … อีก %d", #RE.promptLog - 60) break end
+		L("  %s %q <- %s", p.kind, short(p.text, 26), short(p.path, 50))
+	end
+	for i, e in ipairs(RE.events) do
+		if i > 60 then L("  … อีก %d", #RE.events - 60) break end
+		L("  %s %s (%s)", e.kind, short(e.name, 44), short(e.args, 52))
+	end
+	for i, r in ipairs(RE.rules) do
+		if i > 40 then break end
+		L("  rule[%d] %q -> %s lvl=%d args=%s", i, short(r.text, 24), tostring(r.remote), r.lvl, tostring(r.args))
+	end
+
+	local txt = table.concat(out, "\n")
+	RE.report = txt
+	local lines = {}
+	for line in (txt .. "\n"):gmatch("([^\n]*)\n") do lines[#lines + 1] = line end
+	for i = 1, #lines, 60 do
+		print(table.concat(lines, "\n", i, math.min(i + 59, #lines)))
+	end
+	if setclipboard then pcall(setclipboard, txt) end
+	if writefile then pcall(RE.Save, txt) end
+	if P.ReportBox then
+		P.ReportBox.Text = txt
+		P.ReportBox.Visible = true
+	end
+	if not silent then
+		toast(("รายงาน %d ตัวอักษร • คัดลอกแล้ว / เซฟเป็น GardenProX_RE.txt"):format(#txt), T.accent)
+	end
+	return txt
+end
+
+-- ลูปใช้กฎที่เรียนมา
+local function ruleLoop()
+	while not P.Destroyed do
+		task.wait(0.35)
+		if P.State.UseRules then
+			for _, rule in ipairs(RE.rules) do
+				if P.State["rule_" .. rule.text] ~= false then
+					local e, d = findPromptByText(rule.text)
+					if e and d and d < Cfg.Range then
+						local reach = math.min(tonumber(e.prompt and e.prompt.MaxActivationDistance) or 10, 20) - 1
+						if walkTo(e.part.Position, math.max(reach, 3)) then
+							local key = (e.prompt or e.click) or rule.text
+							local last = P.Cool[key] or 0
+							if os.clock() - last >= Cfg.PromptCd then
+								P.Cool[key] = os.clock()
+								aim(e.part.Position)
+								if fireRule(rule, e) then
+									P.Stats.actions += 1
+									break
+								end
+							end
+						end
+					end
+				end
+			end
+		end
+	end
+end
+task.spawn(ruleLoop)
+
+P.Learn = RE.learn
+P.LearnBuild = learnBuild
+P.Report = RE.Build
 
 --------------------------------------------------------------------------------
 -- ESP + Radar
@@ -688,7 +1227,7 @@ local verLbl = new("TextLabel", { Size = UDim2.fromOffset(52, 1), Position = UDi
 	BackgroundTransparency = 1, Font = Enum.Font.Code, TextSize = 9, TextColor3 = T.stroke,
 	TextXAlignment = Enum.TextXAlignment.Right, Text = "v" .. VERSION }, footer)
 
-local TAB_NAMES = { "หลัก", "ปุ่มโต้ตอบ", "เก็บของ", "เครื่องมือ", "ตั้งค่า" }
+local TAB_NAMES = { "หลัก", "ปุ่มโต้ตอบ", "เก็บของ", "เครื่องมือ", "ตั้งค่า", "วิเคราะห์" }
 local tabBtns, tabs = {}, {}
 local indicator = new("Frame", { Size = UDim2.new(1 / #TAB_NAMES, -8, 0, 24), Position = UDim2.new(0, 4, 0, 4),
 	BackgroundColor3 = T.accent, BorderSizePixel = 0, ZIndex = 2 }, tabRail)
@@ -874,7 +1413,8 @@ local catList = new("Frame", { Size = UDim2.new(0, 0, 0, 0), AutomaticSize = Enu
 new("UIListLayout", { Padding = UDim.new(0, 4), SortOrder = Enum.SortOrder.LayoutOrder }, catList)
 
 section(pMain, "เครื่องมือด่วน", T.accent2)
-button(pMain, "🔍 ตรวจแมพ (คัดลอกรายงาน)", T.violet, function() P.Diagnose() end)
+button(pMain, "📋 รายงานเต็ม (RE) + คัดลอก", T.violet, function() P.Report() end)
+button(pMain, "🧠 บันทึกการเล่น → สร้างกฎ (แท็บวิเคราะห์)", T.gold, function() selectTab(6) end)
 button(pMain, "🎯 วาร์ปไปปุ่มที่ใกล้สุด", T.accent2, function()
 	local my = hrp()
 	local nearest, nd = nil, math.huge
@@ -996,6 +1536,9 @@ button(pSet, "🔄 สแกนใหม่ทันที", T.accent2, function
 button(pSet, "🔍 ตรวจแมพ + คัดลอกรายงาน", T.violet, function() P.Diagnose() end)
 button(pSet, "🛠 ซ่อม UI (คืนตำแหน่ง/ขนาด)", T.card, function() uiSafe(); toast("ซ่อม UI แล้ว", T.accent) end)
 
+toggle(pSet, "ยิงหลายวิธีพร้อมกัน", "TryRough", function() Cfg.TryAll = true end, function() Cfg.TryAll = false end,
+	"กดปุ่ม + แตะวัตถุ + ใช้ไอเทม + คลิกจอ (เปิดไว้ถ้าเกมไม่ยอมรับการกดปุ่ม)")
+
 section(pSet, "คอนโซล")
 P.Console = new("Frame", { Size = UDim2.new(1, 0, 0, 150), BackgroundColor3 = T.well,
 	BackgroundTransparency = 0.15, BorderSizePixel = 0 }, pSet)
@@ -1011,6 +1554,91 @@ local about = new("TextLabel", { Size = UDim2.new(1, 0, 0, 0), AutomaticSize = E
 	TextColor3 = T.sub, TextWrapped = true, TextXAlignment = Enum.TextXAlignment.Left,
 	Text = "  วิธีใช้: แท็บ 'ปุ่มโต้ตอบ' เปิดหมวดที่อยากให้กด (เช่น เก็บเกี่ยว / ขุด / ขาย) แล้วตัวละครจะเดินไปกดเอง\n  ถ้าหมวดไหนขึ้น 0 = ไม่มีปุ่มชนิดนั้นในระยะ → เพิ่ม 'ระยะค้นหา' หรือใช้ปุ่มตรวจแมพดูของจริงในเกม" }, pSet)
 corner(about, 9); pad(about, 8)
+
+--------------------------------------------------------------------------------
+-- TAB 6 : วิเคราะห์แมพ (RE)
+--------------------------------------------------------------------------------
+local pRE = tabs[6]
+section(pRE, "① บันทึกการเล่นจริง (สำคัญสุด)", T.gold)
+local reCard = card(pRE, 46)
+new("TextLabel", { Size = UDim2.new(1, -20, 0, 30), Position = UDim2.fromOffset(10, 7), BackgroundTransparency = 1,
+	Font = Enum.Font.Gotham, TextSize = 9.5, TextColor3 = T.sub, TextWrapped = true,
+	TextXAlignment = Enum.TextXAlignment.Left,
+	Text = "กด 'เริ่มบันทึก' แล้วเล่นเองตามปกติ (เก็บผัก 1 แปลง, ตัดไม้ 1 ต้น, ขุดหิน 1 ก้อน, ขายของ 1 ครั้ง, ฟักไข่ 1 ฟอง) สคริปต์จะจับชื่อ Remote จริง + จำนวนพารามิเตอร์ที่เกมใช้" }, reCard)
+local learnLbl
+local learnBtn = button(pRE, "▶ เริ่มบันทึก (เล่นเอง 1-2 นาที)", T.gold, function()
+	if P.RE.learning then
+		P.Learn(false)
+		if learnLbl then learnLbl.Text = "▶ เริ่มบันทึก (เล่นเอง 1-2 นาที)" end
+		local n = P.LearnBuild()
+		toast(("หยุดบันทึก • ได้ %d กฎ"):format(n), n > 0 and T.accent or T.gold)
+	else
+		P.Learn(true)
+		if learnLbl then learnLbl.Text = "■ หยุดบันทึก + สร้างกฎ" end
+	end
+end, 32)
+learnLbl = learnBtn:FindFirstChildOfClass("TextLabel")
+local reStatus = statusCard(pRE, 3)
+
+section(pRE, "② กฎที่เรียนได้ (เปิดเพื่อให้ทำเอง)", T.accent)
+toggle(pRE, "ใช้กฎที่เรียนมา", "UseRules", nil, nil, "เดินไปใกล้ปุ่มที่ตรงกับกฎ แล้วยิงตามที่เกมใช้จริง")
+local ruleList = new("Frame", { Size = UDim2.new(1, 0, 0, 0), AutomaticSize = Enum.AutomaticSize.Y,
+	BackgroundTransparency = 1 }, pRE)
+new("UIListLayout", { Padding = UDim.new(0, 3), SortOrder = Enum.SortOrder.LayoutOrder }, ruleList)
+P.RuleList = ruleList
+
+section(pRE, "③ ที่เก็บไฟล์ (เลือกเองได้)", T.accent2)
+local pathOuter = card(pRE, 48)
+new("TextLabel", { Size = UDim2.new(1, -20, 0, 13), Position = UDim2.fromOffset(10, 4), BackgroundTransparency = 1,
+	Font = Enum.Font.GothamMedium, TextSize = 9.5, TextColor3 = T.sub, TextXAlignment = Enum.TextXAlignment.Left,
+	Text = "โฟลเดอร์ปลายทาง (แตะเพื่อแก้)" }, pathOuter)
+local pathBox = new("TextBox", { Size = UDim2.new(1, -20, 0, 24), Position = UDim2.fromOffset(10, 20),
+	BackgroundColor3 = T.well, BorderSizePixel = 0, Font = Enum.Font.Code, TextSize = 9.5, TextColor3 = T.text,
+	TextXAlignment = Enum.TextXAlignment.Left, TextEditable = true, ClearTextOnFocus = false,
+	PlaceholderText = "/storage/emulated/0/Download/",
+	Text = RE.SaveDir or "/storage/emulated/0/Download/" }, pathOuter)
+corner(pathBox, 6)
+stroke(pathBox, T.stroke, 0.5)
+pathBox.FocusLost:Connect(function() RE.SaveDir = pathBox.Text end)
+local chipRow2 = new("Frame", { Size = UDim2.new(1, 0, 0, 28), BackgroundTransparency = 1 }, pRE)
+new("UIListLayout", { FillDirection = Enum.FillDirection.Horizontal, Padding = UDim.new(0, 5),
+	SortOrder = Enum.SortOrder.LayoutOrder }, chipRow2)
+for _, preset in ipairs({
+	{ "Download", "/storage/emulated/0/Download/" },
+	{ "Documents", "/storage/emulated/0/Documents/" },
+	{ "Delta", "/storage/emulated/0/Delta/workspace/" },
+	{ "auto", "" },
+}) do
+	local b = new("TextButton", { Size = UDim2.fromOffset(64, 26), BackgroundColor3 = T.card, AutoButtonColor = false,
+		Font = Enum.Font.GothamBold, TextSize = 9.5, TextColor3 = T.sub, Text = preset[1] }, chipRow2)
+	corner(b, 7); stroke(b, T.stroke, 0.5)
+	b.MouseButton1Click:Connect(function()
+		pathBox.Text = preset[2]
+		RE.SaveDir = preset[2]
+		toast("ปลายทาง: " .. (preset[2] == "" and "workspace ของ executor" or preset[2]), T.accent2)
+	end)
+end
+button(pRE, "💾 สร้างรายงาน + เซฟไฟล์ตามโฟลเดอร์นี้", T.accent2, function()
+	RE.SaveDir = pathBox.Text
+	P.Report()
+end, 32)
+
+section(pRE, "④ รายงานเต็ม", T.violet)
+button(pRE, "📋 สร้างรายงาน + คัดลอก + เซฟไฟล์", T.violet, function() P.Report() end)
+local reportBox = new("TextBox", { Size = UDim2.new(1, 0, 0, 170), BackgroundColor3 = T.well,
+	BackgroundTransparency = 0.15, BorderSizePixel = 0, Font = Enum.Font.Code, TextSize = 9,
+	TextColor3 = T.sub, TextXAlignment = Enum.TextXAlignment.Left, TextYAlignment = Enum.TextYAlignment.Top,
+	TextEditable = true, ClearTextOnFocus = false, TextWrapped = true, PlaceholderText = "กดปุ่มด้านบนเพื่อสร้างรายงาน" }, pRE)
+corner(reportBox, 9)
+stroke(reportBox, T.stroke, 0.45)
+pad(reportBox, 6)
+P.ReportBox = reportBox
+
+local reNote = new("TextLabel", { Size = UDim2.new(1, 0, 0, 0), AutomaticSize = Enum.AutomaticSize.Y,
+	BackgroundColor3 = T.card, BackgroundTransparency = 0.1, Font = Enum.Font.Gotham, TextSize = 9,
+	TextColor3 = T.muted, TextWrapped = true, TextXAlignment = Enum.TextXAlignment.Left,
+	Text = "  วิธีอ่านผล: ถ้าหมวดไหน '0 ปุ่ม' แปลว่าเกมไม่ได้ใช้ ProximityPrompt ตรงนั้น → ต้องพึ่งกฎที่เรียนมา (Remote จริง)\n  ไฟล์จะถูกเขียนที่โฟลเดอร์ในช่อง ③ (ถ้าเขียนไม่ได้จะไล่ลอง Download → Documents → Delta → workspace) — ส่งรายงานมาแล้วผมจะเขียนสคริปต์ให้ตรงกับของจริง" }, pRE)
+corner(reNote, 9); pad(reNote, 8)
 
 --------------------------------------------------------------------------------
 -- Diagnose
@@ -1090,6 +1718,22 @@ task.spawn(function()
 					TextSize = 10, TextColor3 = T.gold, TextXAlignment = Enum.TextXAlignment.Left,
 					Text = "ไม่พบปุ่มโต้ตอบในระยะ — เพิ่มระยะค้นหา หรือกดตรวจแมพ" }, catList)
 			end
+			if ruleList then
+				for _, c in ipairs(ruleList:GetChildren()) do if not c:IsA("UIListLayout") then c:Destroy() end end
+				if #P.RE.rules == 0 then
+					local l = new("TextLabel", { Size = UDim2.new(1, 0, 0, 13), BackgroundTransparency = 1,
+						Font = Enum.Font.Code, TextSize = 9.5, TextColor3 = T.muted, TextXAlignment = Enum.TextXAlignment.Left,
+						Text = "ยังไม่มีกฎ — กดบันทึกแล้วเล่นเองก่อน" }, ruleList)
+				else
+					for i, r in ipairs(P.RE.rules) do
+						if i > 8 then break end
+						local l = new("TextLabel", { Size = UDim2.new(1, 0, 0, 12), BackgroundTransparency = 1,
+							Font = Enum.Font.Code, TextSize = 9, TextColor3 = r.remote and T.accent or T.gold,
+							TextXAlignment = Enum.TextXAlignment.Left, TextTruncate = Enum.TextTruncate.AtEnd,
+							Text = ("%s %s ← %s"):format(r.remote and "●" or "○", r.text:sub(1, 20), (r.remote or "กดปุ่มเอง"):sub(-28)) }, ruleList)
+					end
+				end
+			end
 			if P.Rows then
 				for _, cat in ipairs(CAT_ORDER) do
 					local row = P.Rows["Auto_" .. cat]
@@ -1099,6 +1743,13 @@ task.spawn(function()
 					end
 				end
 			end
+		end
+		if reStatus then
+			setLbl(reStatus, table.concat({
+				"บันทึก: " .. (P.RE.learning and "กำลังบันทึก…" or "หยุดอยู่"),
+				("ปุ่มที่กดเอง %d • remote ที่ยิง %d"):format(#P.RE.promptLog, #P.RE.events),
+				("กฎที่เรียน %d • hook %d ตัว"):format(#P.RE.rules, P.RE.hooks or 0),
+			}, "\n"))
 		end
 		if timerLbl then
 			if #timers > 0 then
@@ -1179,6 +1830,9 @@ task.spawn(function()
 	toast(("GardenPro X v%s พร้อม • พบปุ่ม %d"):format(VERSION, n), T.accent)
 	log(("พบปุ่มโต้ตอบ %d • วัตถุ %d ในระยะ %d"):format(n, #P.W.parts, Cfg.Range), n > 0 and "ok" or "warn")
 	if n == 0 then log("ไม่พบปุ่ม — เพิ่มระยะค้นหา หรือไปยืนใกล้จุดที่มีปุ่มก่อน", "warn") end
+	if Workspace.StreamingEnabled then
+		log("แมพนี้เปิด Streaming: ไคลเอนต์เห็นเฉพาะของใกล้ตัว ต้องเดินเข้าโซนก่อนถึงจะเจอปุ่ม", "warn")
+	end
 end)
 
 print(("[GardenProX] v%s พร้อม • universal client helper"):format(VERSION))
