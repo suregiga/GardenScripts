@@ -1,6 +1,7 @@
 --!nocheck
 --[[ ============================================================
-     GardenPro X  (v2)  •  สคริปต์ฟาร์มครบวงจรสำหรับ Garden Game
+     GardenPro X  (v2.2)  •  สคริปต์ฟาร์มครบวงจรสำหรับ Garden Game
+     v2.2: แก้ HUD กดไม่ได้ + ลดอาการกระตุก (สแกนแบบ incremental)
      place 6348373477  •  ปรับแต่งสำหรับ Delta / มือถือ
      ------------------------------------------------------------
      โครงสร้าง:
@@ -39,7 +40,7 @@ local isMobile = UserInputService.TouchEnabled and not UserInputService.Keyboard
 --------------------------------------------------------------------------------
 local Cfg = {
 	Speed = 55, Jump = 120, FlySpeed = 90, Reach = 8,
-	ScanRange = 4000, Delay = 0.05, Jitter = 0.25,
+	ScanRange = 2600, Delay = 0.05, Jitter = 0.25,
 	SellAt = 40, SkipRare = true, Humanize = true, Turbo = false,
 	RadarOn = true, RadarCount = 6, FpsGuard = true,
 	ESP = { ore = true, tree = true, egg = true, animal = false, monster = true, crop = true, loot = true },
@@ -168,8 +169,13 @@ end
 --------------------------------------------------------------------------------
 -- World : แคชโลก + แปลงชื่อเป็นหมวด (คำนวณครั้งเดียวต่อชิ้น)
 --------------------------------------------------------------------------------
-local W = { list = {}, t = 0, prompts = {}, pt = 0 }
+local W = { list = {}, idx = {}, t = 0, prompts = {}, pt = 0 }
 local kindCache = setmetatable({}, { __mode = "k" })
+local function bucket(kind)
+	local b = W.idx[kind]
+	if not b then b = {}; W.idx[kind] = b end
+	return b
+end
 
 local function pathOf(part)
 	local t, node = {}, part
@@ -251,73 +257,110 @@ local function passesFilter(kind, part)
 	return true
 end
 
+-- เก็บเฉพาะ BasePart ที่ถูกเพิ่มเข้ามา (ไม่ต้อง GetDescendants ทั้งเกมทุกครั้ง)
+local tracked = setmetatable({}, { __mode = "k" })
+local function track(d)
+	if d:IsA("BasePart") then tracked[d] = true end
+end
+local function untrack(d)
+	if tracked[d] then tracked[d] = nil end
+end
+
 local function refreshWorld()
-	local list = {}
-	local my = hrp()
-	local ch = char()
+	local list, idx = {}, {}
+	local my, ch = hrp(), char()
 	local origin = my and my.Position or Vector3.zero
-	for _, d in ipairs(Workspace:GetDescendants()) do
-		if d:IsA("BasePart") and d.Transparency < 1 and not (ch and d:IsDescendantOf(ch)) then
-			local dd = (d.Position - origin).Magnitude
-			if dd <= Cfg.ScanRange then table.insert(list, { p = d, d = dd }) end
+	local range = Cfg.ScanRange
+	for part in pairs(tracked) do
+		if part.Parent then
+			if part.Transparency >= 1 or (ch and part:IsDescendantOf(ch)) then
+				-- ข้ามของล่องหน/ของที่ตัวเราใส่อยู่
+			else
+				local dd = (part.Position - origin).Magnitude
+				if dd <= range then
+					local e = { p = part, d = dd }
+					list[#list + 1] = e
+					local info = kindsOf(part)
+					for _, kind in ipairs(OBJECT_KINDS) do
+						if info[kind] then
+							local b = idx[kind]
+							if not b then b = {}; idx[kind] = b end
+							b[#b + 1] = e
+						end
+					end
+				end
+			end
+		else
+			tracked[part] = nil
 		end
 	end
-	W.list = list
+	for _, b in pairs(idx) do table.sort(b, function(x, y) return x.d < y.d end) end
+	W.list, W.idx = list, idx
 	W.t = os.clock()
 end
+
 local function world()
-	if os.clock() - W.t > 0.9 then refreshWorld() end
+	if os.clock() - W.t > 1.6 then refreshWorld() end
 	return W.list
 end
 
 local function nearest(kind, ownOnly, maxD)
 	local my = hrp(); if not my then return nil end
-	local best, bd = nil, maxD or Cfg.ScanRange
-	for _, e in ipairs(world()) do
+	if os.clock() - W.t > 1.6 then refreshWorld() end
+	local b = W.idx[kind]
+	if not b then return nil end
+	local limit = maxD or Cfg.ScanRange
+	for _, e in ipairs(b) do
 		local p = e.p
 		if p.Parent then
 			local k = kindsOf(p)
-			if k[kind] and (not ownOnly or k.own) and passesFilter(kind, p) then
+			if (not ownOnly or k.own) and passesFilter(kind, p) then
 				local dd = dist(p.Position, my.Position)
-				if dd < bd then best, bd = p, dd end
+				if dd < limit then return p, dd end
 			end
 		end
 	end
-	return best, bd
+	return nil
 end
 
 local function collect(kind, ownOnly, maxD, limit)
 	local my = hrp(); if not my then return {} end
-	local out = {}
-	for _, e in ipairs(world()) do
+	if os.clock() - W.t > 1.6 then refreshWorld() end
+	local b = W.idx[kind]
+	if not b then return {} end
+	local out, max = {}, maxD or Cfg.ScanRange
+	for _, e in ipairs(b) do
 		local p = e.p
 		if p.Parent then
 			local k = kindsOf(p)
-			if k[kind] and (not ownOnly or k.own) and passesFilter(kind, p) then
+			if (not ownOnly or k.own) and passesFilter(kind, p) then
 				local dd = dist(p.Position, my.Position)
-				if dd < (maxD or Cfg.ScanRange) then table.insert(out, { p = p, d = dd }) end
+				if dd < max then
+					out[#out + 1] = { p = p, d = dd }
+					if limit and #out >= limit then break end
+				end
 			end
 		end
-		if limit and #out >= limit * 4 then break end
 	end
-	table.sort(out, function(a, b) return a.d < b.d end)
-	while limit and #out > limit do table.remove(out) end
 	return out
 end
 
 local function promptsRefresh()
 	local list = {}
-	for _, d in ipairs(Workspace:GetDescendants()) do
-		if d:IsA("ProximityPrompt") and d.Enabled and d.Parent and d.Parent:IsA("BasePart") then
-			local nm = (d.Parent.Name .. " " .. (d.Parent.Parent and d.Parent.Parent.Name or "")):lower()
-			table.insert(list, { prompt = d, part = d.Parent, name = nm })
+	for part in pairs(tracked) do
+		if part.Parent then
+			local pr = part:FindFirstChildOfClass("ProximityPrompt")
+			if pr and pr.Enabled then
+				local nm = (part.Name .. " " .. (part.Parent and part.Parent.Name or "")):lower()
+				list[#list + 1] = { prompt = pr, part = part, name = nm }
+			end
 		end
 	end
 	W.prompts = list
 	W.pt = os.clock()
 end
 local function prompts()
-	if os.clock() - W.pt > 1.6 then promptsRefresh() end
+	if os.clock() - W.pt > 2.5 then promptsRefresh() end
 	return W.prompts
 end
 local function promptBy(kind, maxD)
@@ -457,23 +500,31 @@ end
 -- GUI helper (สร้าง UI)
 --------------------------------------------------------------------------------
 local function guiParent()
-	local ok, h = pcall(function() return gethui() end)
-	if ok and h then return h end
+	-- ใช้ PlayerGui เป็นหลัก (กดได้แน่) • gethui เป็นตัวเลือก
+	if _G.GPX_USE_GETHUI then
+		local ok, h = pcall(function() return gethui() end)
+		if ok and h then return h end
+	end
 	return LP:WaitForChild("PlayerGui")
 end
 
-local gui = cd("ScreenGui", { Name = "GardenProX", ResetOnSpawn = false, IgnoreGuiInset = true,
-	ZIndexBehavior = Enum.ZIndexBehavior.Sibling, Parent = guiParent() })
+local gui = cd("ScreenGui", { Name = "GardenProX", ResetOnSpawn = false, IgnoreGuiInset = false,
+	Enabled = true, DisplayOrder = 9999, ZIndexBehavior = Enum.ZIndexBehavior.Sibling, Parent = guiParent() })
 P.Toasts = cd("Frame", { Size = UDim2.fromOffset(320, 300), Position = UDim2.fromOffset(0, 100),
-	BackgroundTransparency = 1, Parent = gui }, { cd("UIListLayout", { Padding = UDim.new(0, 6) }) })
+	BackgroundTransparency = 1, Active = false, ZIndex = 100, Parent = gui }, { cd("UIListLayout", { Padding = UDim.new(0, 6) }) })
 
 local root, reopen
 local shown = true
-local function setShown(v) shown = v; root.Visible = v; reopen.Visible = not v end
+local function setShown(v)
+	shown = v
+	root.Visible = v
+	reopen.Visible = not v
+	if v then pcall(function() uiScaleSafe() end) end
+end
 
 reopen = cd("TextButton", { Size = UDim2.fromOffset(58, 58), Position = UDim2.fromOffset(14, 96),
 	Visible = false, BackgroundColor3 = C.accent, BorderSizePixel = 0, Font = Enum.Font.GothamBlack,
-	TextSize = 17, TextColor3 = Color3.fromRGB(15, 22, 16), Text = "GP", ZIndex = 60, Parent = gui })
+	TextSize = 17, TextColor3 = Color3.fromRGB(15, 22, 16), Text = "GP", ZIndex = 120, Parent = gui })
 corner(reopen, 29)
 local rdrag, rfrom, rstart
 reopen.InputBegan:Connect(function(i)
@@ -494,7 +545,8 @@ conn(UserInputService.InputChanged, function(i)
 	end
 end)
 
-root = cd("Frame", { Size = UDim2.fromOffset(620, 486), BackgroundColor3 = C.bg,
+root = cd("Frame", { Size = UDim2.fromOffset(620, 486), AnchorPoint = Vector2.new(0.5, 0.5),
+	Position = UDim2.fromScale(0.5, 0.42), BackgroundColor3 = C.bg, Active = true, ZIndex = 50,
 	BorderSizePixel = 0, ClipsDescendants = true, Parent = gui })
 corner(root, 14)
 cd("UIStroke", { Color = C.stroke, Thickness = 1, Parent = root })
@@ -505,7 +557,7 @@ cd("Frame", { Size = UDim2.new(1, 0, 0, 2), Position = UDim2.new(0, 0, 1, -2),
 	BackgroundColor3 = C.accent, BorderSizePixel = 0, Parent = bar })
 cd("TextLabel", { Size = UDim2.fromOffset(300, 20), Position = UDim2.fromOffset(18, 9),
 	BackgroundTransparency = 1, Font = Enum.Font.GothamBlack, TextSize = 16, TextColor3 = C.text,
-	TextXAlignment = Enum.TextXAlignment.Left, Text = "GARDEN PRO X • ระบบครบวงจร v2", Parent = bar })
+	TextXAlignment = Enum.TextXAlignment.Left, Text = "GARDEN PRO X • v2.2", Parent = bar })
 local subBar = cd("TextLabel", { Size = UDim2.fromOffset(300, 16), Position = UDim2.fromOffset(18, 30),
 	BackgroundTransparency = 1, Font = Enum.Font.Gotham, TextSize = 11, TextColor3 = C.dim,
 	TextXAlignment = Enum.TextXAlignment.Left, Parent = bar,
@@ -537,8 +589,10 @@ local function barBtn(txt, x, col)
 end
 local minBtn = barBtn("—", 440, C.card2)
 local closeBtn = barBtn("✕", 470, C.bad)
-minBtn.Position = UDim2.new(1, -60, 0, 15)
+minBtn.Position = UDim2.new(1, -92, 0, 15)
 closeBtn.Position = UDim2.new(1, -30, 0, 15)
+local fixBtn = barBtn("⟳", 0, C.blue)
+fixBtn.Position = UDim2.new(1, -61, 0, 15)
 
 local rail = cd("Frame", { Size = UDim2.fromOffset(160, 400), Position = UDim2.fromOffset(0, 56),
 	BackgroundColor3 = C.card, BorderSizePixel = 0, Parent = root }, { cd("UIListLayout", { Padding = UDim.new(0, 4) }) })
@@ -903,21 +957,31 @@ end, "ฮีลตัวเอง")
 -- Utility : งานเบื้องหลัง
 --------------------------------------------------------------------------------
 local GUIWORDS = {}
-local function guiButtons(words)
-	local out = {}
-	local function walk(inst)
-		for _, d in ipairs(inst:GetDescendants()) do
+local guiHarvest, guiHarvestT = {}, 0
+local function harvestGui()
+	local list = {}
+	local pg = LP:FindFirstChild("PlayerGui")
+	if pg then
+		for _, d in ipairs(pg:GetDescendants()) do
 			if (d:IsA("TextButton") or d:IsA("ImageButton")) and d.Visible then
-				-- ข้ามปุ่มของ HUD เราเอง กันกดตัวเองซ้ำ
 				if not (gui and d:IsDescendantOf(gui)) then
-					local txt = (d.Name .. " " .. (d:IsA("TextButton") and d.Text or "")):lower()
-					if hit(txt, words) then table.insert(out, d) end
+					list[#list + 1] = {
+						txt = (d.Name .. " " .. (d:IsA("TextButton") and d.Text or "")):lower(),
+						obj = d,
+					}
 				end
 			end
 		end
 	end
-	local pg = LP:FindFirstChild("PlayerGui")
-	if pg then walk(pg) end
+	guiHarvest, guiHarvestT = list, os.clock()
+	return list
+end
+local function guiButtons(words)
+	local src = (os.clock() - guiHarvestT < 0.8) and guiHarvest or harvestGui()
+	local out = {}
+	for _, e in ipairs(src) do
+		if e.obj.Parent and hit(e.txt, words) then out[#out + 1] = e.obj end
+	end
 	return out
 end
 local function press(btn)
@@ -1058,7 +1122,7 @@ local function espLoop()
 		if P.State.ESP and my then
 			for kind, on in pairs(Cfg.ESP) do
 				if on then
-					for _, e in ipairs(collect(kind, kind == "crop", 500, 25)) do
+					for _, e in ipairs(collect(kind, kind == "crop", 420, 14)) do
 						local p = e.p
 						if not espObj[p] then
 							espObj[p] = cd("Highlight", { FillColor = ESPCOL[kind] or C.accent, OutlineColor = ESPCOL[kind] or C.accent,
@@ -1071,7 +1135,7 @@ local function espLoop()
 				if not p.Parent then h:Destroy(); espObj[p] = nil end
 			end
 		end
-		task.wait(1.4)
+		task.wait(2.2)
 	end
 end
 
@@ -1104,7 +1168,7 @@ local function radarLoop()
 				end
 			end
 		end
-		task.wait(0.9)
+		task.wait(1.7)
 	end
 end
 
@@ -1113,14 +1177,17 @@ end
 --------------------------------------------------------------------------------
 local function parseMoney()
 	local pg = LP:FindFirstChild("PlayerGui"); if not pg then return 0 end
-	local best = 0
+	local best, scanned = 0, 0
 	for _, d in ipairs(pg:GetDescendants()) do
-		if d:IsA("TextLabel") and d.Text then
-			local t = d.Text
-			for num in t:gmatch("([%d][%d,]*)") do
-				local n = tonumber((num:gsub(",", "")))
-				if n and n > best then best = n end
+		if d:IsA("TextLabel") then
+			scanned += 1
+			if d.Text and #d.Text > 0 then
+				for num in d.Text:gmatch("([%d][%d,]*)%s*$") do
+					local n = tonumber((num:gsub(",", "")))
+					if n and n > best then best = n end
+				end
 			end
+			if scanned > 200 then break end
 		end
 	end
 	return best
@@ -1137,7 +1204,7 @@ local function statsLoop()
 			if P.Fps < 28 and Cfg.FpsGuard and P.SetESPOff then pcall(P.SetESPOff) end
 		end
 		statTick += dt
-		if statTick >= 1.5 then
+		if statTick >= 3 then
 			statTick = 0
 			local m = parseMoney()
 			if m > 0 then Cfg.lastMoney = m end
@@ -1185,13 +1252,18 @@ local function startFly()
 		end
 	end)
 end
+local noclipTick = 0
 conn(RunService.Stepped, function()
+	noclipTick += 1
 	local h = hum(); if not h then return end
-	if P.State.Speed then h.WalkSpeed = Cfg.Speed end
-	if P.State.Jump then h.UseJumpPower = true; h.JumpPower = Cfg.Jump end
-	if P.State.Noclip and char() then
-		for _, p in ipairs(char():GetDescendants()) do
-			if p:IsA("BasePart") then p.CanCollide = false end
+	if P.State.Speed and h.WalkSpeed ~= Cfg.Speed then h.WalkSpeed = Cfg.Speed end
+	if P.State.Jump and h.JumpPower ~= Cfg.Jump then h.UseJumpPower = true; h.JumpPower = Cfg.Jump end
+	if P.State.Noclip and noclipTick % 4 == 0 then
+		local c = char()
+		if c then
+			for _, p in ipairs(c:GetDescendants()) do
+				if p:IsA("BasePart") then p.CanCollide = false end
+			end
 		end
 	end
 end)
@@ -1516,23 +1588,23 @@ task.spawn(function()
 				filterLbl.Text = "  ตัวกรองปิดอยู่ — เก็บทุกอย่าง\n  เปิดสวิตช์ด้านบนเพื่อเริ่มกรอง"
 			else
 				local pass, total = 0, 0
-				for _, e in ipairs(world()) do
-					local info = kindsOf(e.p)
-					local kind
-					for _, k in ipairs({ "crop", "ore", "tree", "monster", "loot", "egg", "animal" }) do
-						if info[k] then kind = k break end
-					end
-					if kind then
-						total += 1
-						if passesFilter(kind, e.p) then pass += 1 end
+				for _, kind in ipairs({ "crop", "ore", "tree", "monster", "loot", "egg", "animal" }) do
+					local b = W.idx[kind]
+					if b then
+						for _, e in ipairs(b) do
+							if e.p.Parent and e.d <= 900 then
+								total += 1
+								if passesFilter(kind, e.p) then pass += 1 end
+							end
+						end
 					end
 				end
-				filterLbl.Text = ("  ผ่านตัวกรอง %d / %d ชิ้น (%.0f%%)\n  เลเวล %d-%d • เข้มงวด: %s"):format(
+				filterLbl.Text = ("  ผ่านตัวกรอง %d / %d ชิ้นในระยะ 900 (%.0f%%)\n  เลเวล %d-%d • เข้มงวด: %s"):format(
 					pass, total, total > 0 and (pass / total * 100) or 0,
 					Cfg.Filter.minLevel, Cfg.Filter.maxLevel, Cfg.Filter.strict and "ใช่" or "ไม่")
 			end
 		end
-		task.wait(2.5)
+		task.wait(3.5)
 	end
 end)
 
@@ -1636,6 +1708,19 @@ renderWaypoints()
 --------------------------------------------------------------------------------
 -- แท็บ: ตั้งค่า
 --------------------------------------------------------------------------------
+head(pSet, "ซ่อม HUD")
+button(pSet, "⟳ ซ่อม UI ทันที (คืนตำแหน่ง/ขนาด)", function() P.RepairUI(); toast("ซ่อม UI แล้ว", "ok") end, C.blue)
+toggle(pSet, "ย้าย GUI ไป gethui (ถ้าโดน UI เกมทับ)", "UseGethui", function()
+	_G.GPX_USE_GETHUI = true
+	local ok, h = pcall(function() return gethui() end)
+	if ok and h then gui.Parent = h; P.RepairUI(); toast("ย้ายไป gethui แล้ว", "ok")
+	else toast("executor นี้ไม่มี gethui", "err") end
+end, function()
+	_G.GPX_USE_GETHUI = false
+	gui.Parent = LP:WaitForChild("PlayerGui")
+	P.RepairUI()
+end)
+
 head(pSet, "ประสิทธิภาพ / ความปลอดภัย")
 toggle(pSet, "โหมดโหด (ไม่มีดีเลย์)", "Turbo", function()
 	Cfg.Turbo = true; Cfg.Humanize = false; Cfg.Delay = 0.01
@@ -1727,6 +1812,7 @@ conn(UserInputService.InputBegan, function(i, busy)
 	if i.KeyCode == Enum.KeyCode.RightControl then P.Destroy() end
 end)
 minBtn.MouseButton1Click:Connect(function() setShown(false) end)
+fixBtn.MouseButton1Click:Connect(function() pcall(P.RepairUI) end)
 closeBtn.MouseButton1Click:Connect(function() P.Destroy() end)
 
 local dragging, from, startPos
@@ -1749,17 +1835,26 @@ local scale = cd("UIScale", { Parent = root })
 local function fit()
 	local cam = Workspace.CurrentCamera
 	local vp = cam and cam.ViewportSize or Vector2.new(1280, 720)
-	local s = math.clamp(math.min(vp.X / 680, vp.Y / 560), 0.55, 1)
+	local s = math.clamp(math.min(vp.X / 680, vp.Y / 580), 0.6, 1)
 	scale.Scale = s
-	if isMobile then
-		root.Position = UDim2.fromOffset(math.max(6, (vp.X - 620 * s) / 2), 6)
-	else
-		root.Position = UDim2.fromOffset(math.max(10, (vp.X - 620 * s) / 2), math.max(10, (vp.Y - 486 * s) / 2))
-	end
+	root.Position = UDim2.fromScale(0.5, isMobile and 0.45 or 0.46)
 end
 fit()
 local cam = Workspace.CurrentCamera
-if cam then conn(cam:GetPropertyChangedSignal("ViewportSize"), fit) end
+if cam then conn(cam:GetPropertyChangedSignal("ViewportSize"), function() task.wait(0.2) fit() end) end
+
+-- ซ่อม UI: คืนตาแหน่ง/สเกล ถ้า HUD หายหรือค้าง
+function P.RepairUI()
+	setShown(true)
+	uiScaleSafe()
+end
+function uiScaleSafe()
+	pcall(fit)
+	root.Visible = true
+	root.Position = UDim2.fromScale(0.5, 0.46)
+	root.Size = UDim2.fromOffset(620, 486)
+	switchTab("หลัก", nMain)
+end
 
 switchTab("หลัก", nMain)
 
@@ -1790,6 +1885,15 @@ task.spawn(utilLoop)
 task.spawn(function()
 	task.wait(isMobile and 2.5 or 1.5)
 	ensureProfile = pcall(loadProfile)
+	-- เติมรายการวัตถุครั้งเดียว แล้วค่อยติดตามของใหม่แบบ incremental
+	task.spawn(function()
+		for _, d in ipairs(Workspace:GetDescendants()) do track(d) end
+		log(("ติดตามวัตถุ %d ชิ้น"):format((function()
+			local n = 0
+			for _ in pairs(tracked) do n += 1 end
+			return n
+		end)()))
+	end)
 	scanRemotes()
 	refreshWorld()
 	promptsRefresh()
@@ -1801,8 +1905,12 @@ task.spawn(function()
 	local n = 0
 	for _, r in ipairs(remotes) do if next(r.score) ~= nil then n += 1 end end
 	toast(("GardenPro X พร้อม • รีโมท %d • วัตถุ %d"):format(n, #W.list), "ok")
-	log("เริ่มระบบ • เปิดทุกอย่างได้ที่แท็บ 'หลัก'")
+	pcall(P.RepairUI)
+	log("เริ่มระบบ • v2.2 • เปิดทุกอย่างได้ที่แท็บ 'หลัก'")
 end)
+
+conn(Workspace.DescendantAdded, track)
+conn(Workspace.DescendantRemoving, untrack)
 
 conn(Players.LocalPlayer.CharacterAdded, function()
 	task.wait(1)

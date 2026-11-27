@@ -5,7 +5,7 @@
 ]]
 
 local NAME = "GardenPro X"
-local VER  = "2.1"
+local VER  = "2.2"
 local BASE = "https://raw.githubusercontent.com/suregiga/GardenScripts/main/"
 local FILES = {
 	BASE .. "GardenProX.lua?t=" .. tostring(os.time()),                              -- หลัก (กันแคช)
