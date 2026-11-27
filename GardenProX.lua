@@ -1,7 +1,7 @@
 --!nocheck
 --[[ ============================================================
-     GardenPro X  (v2.3)  •  สคริปต์ฟาร์มครบวงจรสำหรับ Garden Game
-     v2.3: แก้ crash VirtualUser.Idled + HUD พอดีทุกจอ (auto-fit + สไลเดอร์ขนาด UI)
+     GardenPro X  (v2.4)  •  สคริปต์ฟาร์มครบวงจรสำหรับ Garden Game
+     v2.4: เพิ่มโหมดตรวจแมพ / แก้ crash VirtualUser.Idled + HUD พอดีทุกจอ (auto-fit + สไลเดอร์ขนาด UI)
      place 6348373477  •  ปรับแต่งสำหรับ Delta / มือถือ
      ------------------------------------------------------------
      โครงสร้าง:
@@ -11,6 +11,7 @@
        Stats   : อ่านเงิน/นับของที่เก็บได้/เวลาเล่น
        Profile : เซฟค่า+จุดวาร์ป ตาม PlaceId
      ปุ่ม: RightShift ซ่อน HUD • RightCtrl ปิดสคริปต์ • ปุ่ม GP ลากได้
+     เริ่มใช้: แท็บ หลัก → กด "ตรวจแมพ" → ส่งรายงานมาเพื่อจูนคำค้นหาให้ตรงเกม
      ============================================================ ]]
 
 if _G.GardenProX and _G.GardenProX.Destroy then pcall(_G.GardenProX.Destroy) end
@@ -44,6 +45,7 @@ local Cfg = {
 	SellAt = 40, SkipRare = true, Humanize = true, Turbo = false, UIScale = 1,
 	RadarOn = true, RadarCount = 6, FpsGuard = true,
 	ESP = { ore = true, tree = true, egg = true, animal = false, monster = true, crop = true, loot = true },
+	UseTouch = true,       -- ใช้การแตะ (firetouchinterest) ช่วยตอนปลูก/เก็บ
 	Filter = {
 		enabled = false, strict = false,
 		tiers = { common = true, uncommon = true, rare = true, epic = true, legendary = true, mythic = true, divine = true },
@@ -502,6 +504,48 @@ local function aim(pos)
 	if cam then pcall(function() cam.CFrame = CFrame.lookAt(cam.CFrame.Position, pos) end) end
 end
 
+-- กดคลิกที่ "ตำแหน่งของวัตถุบนจอ" (แม่นกว่ากดกลางจอ)
+local function clickWorld(pos)
+	local cam = Workspace.CurrentCamera
+	if not cam then return end
+	local sp, onScreen = cam:WorldToViewportPoint(pos)
+	if onScreen and sp.Z > 0 then
+		if mouse1move then pcall(mouse1move, sp.X, sp.Y) end
+		if mouse1click then
+			if pcall(mouse1click) then return end
+		end
+		pcall(function()
+			VirtualUser:CaptureController()
+			VirtualUser:Button1Down(Vector2.new(sp.X, sp.Y), cam.CFrame)
+			task.wait(0.04)
+			VirtualUser:Button1Up(Vector2.new(sp.X, sp.Y), cam.CFrame)
+		end)
+	else
+		clickCenter()
+	end
+end
+
+-- จำลองการแตะวัตถุ (เกมที่ใช้ Touched จะรับรู้)
+local function touchPart(part)
+	if not Cfg.UseTouch or not part then return end
+	if not firetouchinterest then return end
+	local my = hrp()
+	if not my then return end
+	pcall(function()
+		firetouchinterest(my, part, 0)
+		task.wait(0.03)
+		firetouchinterest(my, part, 1)
+	end)
+end
+
+-- ใช้ไอเทม + คลิกที่วัตถุ + แตะ
+local function useOn(part, times)
+	aim(part.Position)
+	useTool(times or 1, 0.08)
+	clickWorld(part.Position)
+	touchPart(part)
+end
+
 --------------------------------------------------------------------------------
 -- GUI helper (สร้าง UI)
 --------------------------------------------------------------------------------
@@ -595,7 +639,7 @@ cd("Frame", { Size = UDim2.new(1, 0, 0, 2), Position = UDim2.new(0, 0, 1, -2),
 cd("TextLabel", { Size = UDim2.fromOffset(232, 20), Position = UDim2.fromOffset(16, 8),
 	BackgroundTransparency = 1, Font = Enum.Font.GothamBlack, TextSize = 15, TextColor3 = C.text,
 	TextXAlignment = Enum.TextXAlignment.Left, TextTruncate = Enum.TextTruncate.AtEnd,
-	Text = "GARDEN PRO X • v2.3", Parent = bar })
+	Text = "GARDEN PRO X • v2.4", Parent = bar })
 local subBar = cd("TextLabel", { Size = UDim2.fromOffset(232, 14), Position = UDim2.fromOffset(16, 30),
 	BackgroundTransparency = 1, Font = Enum.Font.Gotham, TextSize = 10.5, TextColor3 = C.dim,
 	TextXAlignment = Enum.TextXAlignment.Left, TextTruncate = Enum.TextTruncate.AtEnd, Parent = bar,
@@ -844,13 +888,76 @@ end
 --------------------------------------------------------------------------------
 -- งาน: ฟาร์ม
 --------------------------------------------------------------------------------
+local function nameOwned(name)
+	local n = name:lower()
+	return n:find(LP.Name:lower(), 1, true) ~= nil or n:find(tostring(LP.UserId), 1, true) ~= nil
+end
+local function attrOwner(inst)
+	for _, key in ipairs({ "Owner", "Player", "PlayerName", "UserId", "OwnerId" }) do
+		local v = inst:GetAttribute(key)
+		if v ~= nil then
+			local t = tostring(v):lower()
+			if t == LP.Name:lower() or t == tostring(LP.UserId) then return true end
+		end
+	end
+	return false
+end
+local function ownPlotOf(part)
+	local node = part
+	for _ = 1, 5 do
+		if not node then break end
+		if nameOwned(node.Name) or attrOwner(node) then return true end
+		node = node.Parent
+	end
+	return false
+end
+
+-- หาแปลง: 1) ชื่อ/attribute บอกว่าเป็นของเรา  2) ถ้าไม่เจอ ใช้แปลงที่ใกล้ตัวสุด
 local function plotsOf()
-	local out = {}
+	local mine, any = {}, {}
+	local my = hrp()
 	for _, e in ipairs(world()) do
 		local k = kindsOf(e.p)
-		if k.plant and k.own then table.insert(out, e.p) end
+		if k.plant then
+			if k.own or ownPlotOf(e.p) then mine[#mine + 1] = e.p else any[#any + 1] = e.p end
+		end
 	end
-	return out
+	if #mine > 0 then return mine end
+	if #any > 0 and my then
+		table.sort(any, function(a, b)
+			return (a.Position - my.Position).Magnitude < (b.Position - my.Position).Magnitude
+		end)
+		P.PlotFallback = true
+		local out = {}
+		for i = 1, math.min(#any, 8) do out[i] = any[i] end
+		return out
+	end
+	return mine
+end
+
+-- หาพืชที่ใกล้แปลงของเราที่สุด (ไม่ต้องพึ่งชื่อโฟลเดอร์ผู้เล่น)
+local function cropNearPlots()
+	local my = hrp()
+	if not my then return nil end
+	local crops = W.idx.crop or {}
+	local plots = plotsOf()
+	local best, bd
+	if #plots == 0 then
+		for i = 1, math.min(#crops, 60) do
+			local cp = crops[i].p
+			local d = (cp.Position - my.Position).Magnitude
+			if d < 40 and (not bd or d < bd) then best, bd = cp, d end
+		end
+		return best
+	end
+	for i = 1, math.min(#crops, 60) do
+		local cp = crops[i].p
+		for _, plot in ipairs(plots) do
+			local d = (cp.Position - plot.Position).Magnitude
+			if d < 30 and (not bd or d < bd) then best, bd = cp, d end
+		end
+	end
+	return best
 end
 local function plotHasCrop(plot)
 	for _, e in ipairs(world()) do
@@ -861,12 +968,10 @@ local function plotHasCrop(plot)
 end
 
 registerAction("Harvest", 92, function()
-	local t = nearest("crop", true)
-	if not t then return end
+	local t = cropNearPlots() or nearest("crop", true)
+	if not t then warnOnce("crop", "ไม่พบพืชให้เก็บ — กดปุ่ม 'ตรวจแมพ' ในแท็บหลัก") return end
 	if walkTo(t.Position, Cfg.Reach) then
-		useTool(2, 0.1)
-		aim(t.Position)
-		clickCenter()
+		useOn(t, 2)
 		fire("crop", t)
 		P.Stats.items += 1
 	else
@@ -907,9 +1012,7 @@ registerAction("Plant", 88, function()
 		if not plotHasCrop(plot) then
 			if walkTo(plot.Position, Cfg.Reach) then
 				if seed.Parent ~= char() and h then pcall(function() h:EquipTool(seed) end) end
-				aim(plot.Position)
-				useTool(1, 0.05)
-				clickCenter()
+				useOn(plot, 1)
 				fire("plant", plot, seed.Name)
 			else
 				aim(plot.Position)
@@ -924,9 +1027,85 @@ registerAction("Water", 84, function()
 	local plot = plotsOf()[1]
 	if not plot then return end
 	if walkTo(plot.Position, Cfg.Reach) then
-		equip("toolCan"); aim(plot.Position); useTool(1, 0.05); fire("water", plot)
+		equip("toolCan")
+		useOn(plot, 1)
+		fire("water", plot)
 	end
 end, "รดน้ำ")
+
+--------------------------------------------------------------------------------
+-- ตรวจแมพ (Diagnose) — บอกว่าเกมมีอะไร ชื่ออะไร เพื่อปรับให้ตรง
+--------------------------------------------------------------------------------
+function P.Diagnose()
+	local lines = {}
+	local function add(fmt, ...)
+		local ok, txt = pcall(string.format, fmt, ...)
+		lines[#lines + 1] = ok and txt or tostring(fmt)
+	end
+	add("=== GardenProX diagnose ===")
+	add("place=%s player=%s", game.PlaceId, LP.Name)
+
+	local nTracked, nWorld = 0, #W.list
+	for _ in pairs(tracked) do nTracked += 1 end
+	add("parts tracked=%d inRange=%d scanRange=%d", nTracked, nWorld, Cfg.ScanRange)
+
+	-- แปลง
+	local plots = plotsOf()
+	add("plots=%d fallback=%s", #plots, tostring(P.PlotFallback or false))
+	for i = 1, math.min(#plots, 6) do
+		local pl = plots[i]
+		add("  plot[%d] %s | %s", i, pl.Name, pl:GetFullName():sub(1, 70))
+	end
+
+	-- พืช
+	local crops = W.idx.crop or {}
+	add("crops=%d", #crops)
+	for i = 1, math.min(#crops, 6) do
+		local info = kindsOf(crops[i].p)
+		add("  crop[%d] %s (tier=%s lv=%s d=%d)", i, crops[i].p.Name,
+			tostring(info.tier), tostring(info.lvl), math.floor(crops[i].d))
+	end
+
+	-- ไอเท็มในกระเป๋า
+	local bp = LP:FindFirstChild("Backpack")
+	local tools = {}
+	if bp then
+		for _, t in ipairs(bp:GetChildren()) do
+			if t:IsA("Tool") then tools[#tools + 1] = t.Name end
+		end
+	end
+	add("tools=%d", #tools)
+	for i = 1, math.min(#tools, 12) do add("  tool %s", tools[i]) end
+
+	-- ProximityPrompt
+	local prs = prompts()
+	add("prompts=%d", #prs)
+	for i = 1, math.min(#prs, 8) do
+		local e = prs[i]
+		add("  prompt %s | %s | action=%s obj=%s", e.part.Name,
+			e.part:GetFullName():sub(1, 50), e.prompt.ActionText, e.prompt.ObjectText)
+	end
+
+	-- Remote ที่เข้าข่าย
+	local hits = 0
+	add("remotes")
+	for _, r in ipairs(remotes) do
+		if next(r.score) ~= nil and hits < 14 then
+			hits += 1
+			local kinds = {}
+			for k in pairs(r.score) do kinds[#kinds + 1] = k end
+			add("  %s -> %s (%s)", r.name, table.concat(kinds, ","), r.path:sub(1, 45))
+		end
+	end
+	if hits == 0 then add("  (ไม่มีรีโมทที่เข้าข่าย — กด 'สแกนรีโมทใหม่')") end
+
+	local text = table.concat(lines, "\n")
+	print(text)
+	if setclipboard then pcall(setclipboard, text) end
+	for _, l in ipairs(lines) do log(l) end
+	toast("คัดลอกรายงานตรวจแมพแล้ว — ส่งมาให้ดูได้", "ok")
+	return text
+end
 
 --------------------------------------------------------------------------------
 -- งาน: เก็บของ
@@ -1433,6 +1612,9 @@ button(pMain, "วาร์ปไปของที่ใกล้สุด", fu
 	if best then hrp().CFrame = CFrame.new(best.Position + Vector3.new(0, 7, 0)); toast(("วาร์ป %s (%.0fm)"):format(bk, bd), "ok") end
 end)
 button(pMain, "สแกนโลกใหม่ทันที", function() refreshWorld(); promptsRefresh(); toast(("พบวัตถุ %d ชิ้น"):format(#W.list), "ok") end)
+button(pMain, "🔍 ตรวจแมพ (คัดลอกรายงานส่งให้ดู)", function()
+	scanRemotes(); refreshWorld(); promptsRefresh(); P.Diagnose()
+end, C.blue, 34)
 
 --------------------------------------------------------------------------------
 -- แท็บ: ฟาร์ม
@@ -1761,6 +1943,12 @@ renderWaypoints()
 --------------------------------------------------------------------------------
 -- แท็บ: ตั้งค่า
 --------------------------------------------------------------------------------
+head(pSet, "การทำงานในเกม")
+toggle(pSet, "ใช้การแตะวัตถุ (Touched) ช่วยปลูก/เก็บ", "UseTouch", function()
+	Cfg.UseTouch = true
+end, function()
+	Cfg.UseTouch = false
+end)
 head(pSet, "ซ่อม HUD")
 button(pSet, "⟳ ซ่อม UI ทันที (คืนตำแหน่ง/ขนาด)", function() P.RepairUI(); toast("ซ่อม UI แล้ว", "ok") end, C.blue)
 slider(pSet, "ขนาด UI", 60, 130, math.floor((Cfg.UIScale or 1) * 100), "%d%%", function(v)
@@ -1818,6 +2006,9 @@ button(pSet, "คัดลอกรายชื่อรีโมททั้ง
 	if setclipboard then pcall(setclipboard, table.concat(t, "\n")) end
 	toast("คัดลอกแล้ว — เอามาวางในแชทได้เลย", "ok")
 end)
+button(pSet, "🔍 ตรวจแมพ + คัดลอกรายงาน", function()
+	scanRemotes(); refreshWorld(); promptsRefresh(); P.Diagnose()
+end, C.blue)
 button(pSet, "ยิงรีโมททดสอบตามหมวด", function()
 	for _, k in ipairs({ "plant", "crop", "sell", "quest", "egg", "loot" }) do
 		local r, s = bestRemote(k)
@@ -1954,7 +2145,18 @@ task.spawn(function()
 	for _, r in ipairs(remotes) do if next(r.score) ~= nil then n += 1 end end
 	toast(("GardenPro X พร้อม • รีโมท %d • วัตถุ %d"):format(n, #W.list), "ok")
 	pcall(P.RepairUI)
-	log("เริ่มระบบ • v2.3 • เปิดทุกอย่างได้ที่แท็บ 'หลัก'")
+	-- เช็คความพร้อมแบบเร็ว ๆ บอกในคอนโซล
+	task.delay(2, function()
+		local plots = plotsOf()
+		local seed = bestSeed()
+		local prs = prompts()
+		log(("พร้อม: แปลง %d • เมล็ด %s • prompt %d • วัตถุในระยะ %d"):format(
+			#plots, seed and seed.Name or "ไม่มี", #prs, #W.list), #plots > 0 and "ok" or "warn")
+		if #plots == 0 then
+			log("ไม่พบแปลง → กด 'ตรวจแมพ' เพื่อดูชื่อจริงในเกม", "warn")
+		end
+	end)
+	log("เริ่มระบบ • v2.4 • ตรวจแมพได้ที่แท็บ 'หลัก'")
 end)
 
 conn(Workspace.DescendantAdded, track)
