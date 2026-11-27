@@ -26,7 +26,7 @@ local Stats            = game:GetService("Stats")
 local VirtualUser      = game:GetService("VirtualUser")
 
 local LP = Players.LocalPlayer
-local VERSION = "7.1"
+local VERSION = "7.3"
 local isMobile = UserInputService.TouchEnabled and not UserInputService.KeyboardEnabled
 
 local P = {
@@ -705,44 +705,70 @@ function RE.learn(on)
 	end
 end
 
-function RE.Save(txt)
-	local name = "GardenProX_RE.txt"
-	local bases = {}
+local function pathList()
+	local order = {}
 	if RE.SaveDir and #RE.SaveDir > 2 then
 		local d = RE.SaveDir
 		if d:sub(-1) ~= "/" then d = d .. "/" end
-		bases[#bases + 1] = d
+		order[#order + 1] = { label = "ที่คุณเลือก", base = d }
 	end
-	for _, b in ipairs({ "/storage/emulated/0/Download/", "/sdcard/Download/",
-		"/storage/emulated/0/Documents/", "/storage/emulated/0/Delta/workspace/", "" }) do
-		bases[#bases + 1] = b
-	end
-	local done, best = {}, nil
-	for _, base in ipairs(bases) do
-		local target = base .. name
-		local ok = pcall(writefile, target, txt)
-		local exists = false
-		if ok and isfile then
-			local ok2, res = pcall(isfile, target)
-			exists = (ok2 and res == true)
+	order[#order + 1] = { label = "workspace", base = "" }
+	order[#order + 1] = { label = "Download", base = "/storage/emulated/0/Download/" }
+	order[#order + 1] = { label = "sdcard/Download", base = "/sdcard/Download/" }
+	order[#order + 1] = { label = "Documents", base = "/storage/emulated/0/Documents/" }
+	order[#order + 1] = { label = "Delta/workspace", base = "/storage/emulated/0/Delta/workspace/" }
+	return order
+end
+
+-- เขียนไฟล์ 1 ที่ แล้ว "อ่านกลับมาเทียบ" ว่าเขียนจริง
+local function tryWrite(base, name, txt)
+	local target = base .. name
+	if not writefile then return false, target, "executor ไม่มี writefile" end
+	local ok, err = pcall(writefile, target, txt)
+	if not ok then return false, target, tostring(err):sub(1, 60) end
+	if readfile then
+		local rok, content = pcall(readfile, target)
+		if not rok then return false, target, "เขียนได้แต่อ่านกลับไม่ได้ (sandbox)" end
+		if type(content) == "string" and #content == #txt then
+			return true, target, "ตรวจแล้วตรง " .. #txt .. " ไบต์"
 		end
-		local good = ok and (exists or not isfile)
-		local shown = (target == name) and ("workspace/" .. name) or target
-		done[#done + 1] = { path = shown, ok = good }
-		if good then
+		return false, target, "ขนาดไม่ตรง (" .. tostring(type(content) == "string" and #content or "?") .. ")"
+	end
+	return true, target, "เขียนได้ (ไม่มี readfile ให้ตรวจ)"
+end
+
+function RE.TestPaths()
+	local results = {}
+	for _, p2 in ipairs(pathList()) do
+		local ok, target, msg = tryWrite(p2.base, "GPX_probe.txt", "gardenprobe")
+		local shown = (target == "GPX_probe.txt") and ("workspace/GPX_probe.txt") or target
+		results[#results + 1] = { ok = ok, path = shown, msg = msg }
+		log((ok and "✅ " or "❌ ") .. shown .. " — " .. msg, ok and "ok" or "warn")
+	end
+	RE.LastResults = results
+	return results
+end
+
+function RE.Save(txt)
+	local done, best = {}, nil
+	for _, p2 in ipairs(pathList()) do
+		local ok, target, msg = tryWrite(p2.base, "GardenProX_RE.txt", txt)
+		local shown = (target == "GardenProX_RE.txt") and ("workspace/GardenProX_RE.txt") or target
+		done[#done + 1] = { ok = ok, path = shown, msg = msg }
+		log((ok and "✅ เซฟ: " or "❌ ไม่ได้: ") .. shown .. " — " .. msg, ok and "ok" or "warn")
+		if ok then
 			best = shown
+			RE.LastSaved = shown
 			break
 		end
 	end
-	for _, d in ipairs(done) do
-		log((d.ok and "เซฟได้: " or "เขียนไม่ได้: ") .. d.path, d.ok and "ok" or "warn")
-	end
+	RE.LastResults = done
+	RE.LastReport = txt
 	if best then
-		toast("เซฟไฟล์ที่ " .. best, T.accent)
+		toast("เซฟแล้ว: " .. best, T.accent)
 	else
-		toast("เขียนไฟล์ไม่ได้ทุกที่ — ใช้คลิปบอร์ด/F9 แทน", T.gold)
+		toast("เขียนไฟล์ไม่ได้เลย — ใช้คลิปบอร์ด/F9 (คัดลอกให้แล้ว)", T.gold)
 	end
-	RE.LastSaved = best
 	return best, done
 end
 
@@ -750,9 +776,26 @@ function RE.Build(silent)
 	local out, cnt = {}, 0
 	local function L(fmt, ...)
 		cnt += 1
-		if cnt > 1400 then return end
+		if cnt > 2600 then return end
 		local ok, s2 = pcall(string.format, fmt, ...)
 		out[#out + 1] = ok and s2 or tostring(fmt)
+	end
+	local function sec8()
+	L("## 1b) ที่บันทึกไว้ (สำคัญสุด)")
+	L("promptEvents=%d remoteEvents=%d rules=%d", #RE.promptLog, #RE.events, #RE.rules)
+	for i, p in ipairs(RE.promptLog) do
+		if i > 60 then L("  … อีก %d", #RE.promptLog - 60) break end
+		L("  %s %q <- %s", p.kind, short(p.text, 26), short(p.path, 50))
+	end
+	for i, e in ipairs(RE.events) do
+		if i > 60 then L("  … อีก %d", #RE.events - 60) break end
+		L("  %s %s (%s)", e.kind, short(e.name, 44), short(e.args, 52))
+	end
+	for i, r in ipairs(RE.rules) do
+		if i > 40 then break end
+		L("  rule[%d] %q -> %s lvl=%d args=%s", i, short(r.text, 24), tostring(r.remote), r.lvl, tostring(r.args))
+	end
+
 	end
 	L("=== GardenProX RE v%s ===", VERSION)
 	L("place=%s player=%s mobile=%s", game.PlaceId, LP.Name, tostring(isMobile))
@@ -776,6 +819,8 @@ function RE.Build(silent)
 	if #pa > 0 then L("  playerAttrs: %s", table.concat(pa, ", ")) end
 
 	L("")
+	sec8()
+
 	L("## 2) โครงสร้าง Workspace")
 	local tops = {}
 	for _, c in ipairs(Workspace:GetChildren()) do
@@ -945,21 +990,6 @@ function RE.Build(silent)
 	end
 
 	L("")
-	L("## 8) ที่บันทึกไว้")
-	L("promptEvents=%d remoteEvents=%d rules=%d", #RE.promptLog, #RE.events, #RE.rules)
-	for i, p in ipairs(RE.promptLog) do
-		if i > 60 then L("  … อีก %d", #RE.promptLog - 60) break end
-		L("  %s %q <- %s", p.kind, short(p.text, 26), short(p.path, 50))
-	end
-	for i, e in ipairs(RE.events) do
-		if i > 60 then L("  … อีก %d", #RE.events - 60) break end
-		L("  %s %s (%s)", e.kind, short(e.name, 44), short(e.args, 52))
-	end
-	for i, r in ipairs(RE.rules) do
-		if i > 40 then break end
-		L("  rule[%d] %q -> %s lvl=%d args=%s", i, short(r.text, 24), tostring(r.remote), r.lvl, tostring(r.args))
-	end
-
 	local txt = table.concat(out, "\n")
 	RE.report = txt
 	local lines = {}
@@ -972,9 +1002,19 @@ function RE.Build(silent)
 	if P.ReportBox then
 		P.ReportBox.Text = txt
 		P.ReportBox.Visible = true
+		if P.SaveResultBox then
+			local res = P.RE.LastResults or {}
+			if #res > 0 then
+				local L2 = {}
+				for _, r in ipairs(res) do
+					L2[#L2 + 1] = ("%s %s — %s"):format(r.ok and "✅" or "❌", r.path, r.msg)
+				end
+				P.SaveResultBox.Text = table.concat(L2, "  |  ")
+			end
+		end
 	end
 	if not silent then
-		toast(("รายงาน %d ตัวอักษร • คัดลอกแล้ว / เซฟเป็น GardenProX_RE.txt"):format(#txt), T.accent)
+		toast(("คัดลอกรายงานทั้ง %d ตัวอักษร (%d บรรทัด) แล้ว — วางได้เลย"):format(#txt, #lines), T.accent)
 	end
 	return txt
 end
@@ -1623,6 +1663,23 @@ button(pRE, "💾 สร้างรายงาน + เซฟไฟล์ต�
 	P.Report()
 end, 32)
 
+local saveResult = new("TextLabel", { Size = UDim2.new(1, 0, 0, 0), AutomaticSize = Enum.AutomaticSize.Y,
+	BackgroundColor3 = T.well, BackgroundTransparency = 0.1, Font = Enum.Font.Code, TextSize = 9,
+	TextColor3 = T.sub, TextWrapped = true, TextXAlignment = Enum.TextXAlignment.Left,
+	Text = "  ยังไม่ได้ทดสอบ — กดปุ่มด้านบน" }, pRE)
+corner(saveResult, 8)
+pad(saveResult, 6)
+button(pRE, "🔎 ทดสอบว่าอุปกรณ์นี้เซฟได้ที่ไหน", T.card, function()
+	local res = RE.TestPaths()
+	local L = {}
+	for _, r in ipairs(res) do
+		L[#L + 1] = ("%s %s — %s"):format(r.ok and "✅" or "❌", r.path, r.msg)
+	end
+	saveResult.Text = table.concat(L, "  |  ")
+	local anyOk = false
+	for _, r in ipairs(res) do if r.ok then anyOk = true end end
+	toast(anyOk and "มีที่เซฟได้ — ดูผลในกล่องด้านล่าง" or "ไม่มีที่ไหนเซฟได้ ใช้คลิปบอร์ดแทน", anyOk and T.accent or T.gold)
+end)
 section(pRE, "④ รายงานเต็ม", T.violet)
 button(pRE, "📋 สร้างรายงาน + คัดลอก + เซฟไฟล์", T.violet, function() P.Report() end)
 local reportBox = new("TextBox", { Size = UDim2.new(1, 0, 0, 170), BackgroundColor3 = T.well,
