@@ -1,7 +1,7 @@
 --!nocheck
 --[[ ============================================================
-     GardenPro X  (v2.2)  •  สคริปต์ฟาร์มครบวงจรสำหรับ Garden Game
-     v2.2: แก้ HUD กดไม่ได้ + ลดอาการกระตุก (สแกนแบบ incremental)
+     GardenPro X  (v2.3)  •  สคริปต์ฟาร์มครบวงจรสำหรับ Garden Game
+     v2.3: แก้ crash VirtualUser.Idled + HUD พอดีทุกจอ (auto-fit + สไลเดอร์ขนาด UI)
      place 6348373477  •  ปรับแต่งสำหรับ Delta / มือถือ
      ------------------------------------------------------------
      โครงสร้าง:
@@ -41,7 +41,7 @@ local isMobile = UserInputService.TouchEnabled and not UserInputService.Keyboard
 local Cfg = {
 	Speed = 55, Jump = 120, FlySpeed = 90, Reach = 8,
 	ScanRange = 2600, Delay = 0.05, Jitter = 0.25,
-	SellAt = 40, SkipRare = true, Humanize = true, Turbo = false,
+	SellAt = 40, SkipRare = true, Humanize = true, Turbo = false, UIScale = 1,
 	RadarOn = true, RadarCount = 6, FpsGuard = true,
 	ESP = { ore = true, tree = true, egg = true, animal = false, monster = true, crop = true, loot = true },
 	Filter = {
@@ -110,7 +110,13 @@ local function pad(o, n) cd("UIPadding", { PaddingLeft = UDim.new(0, n), Padding
 local function tween(o, t, props)
 	TweenService:Create(o, TweenInfo.new(t or 0.15, Enum.EasingStyle.Quad, Enum.EasingDirection.Out), props):Play()
 end
-local function conn(sig, fn) local c = sig:Connect(fn); table.insert(P.Conns, c); return c end
+local function conn(sig, fn)
+	if not sig then return nil end
+	local ok, c = pcall(function() return sig:Connect(fn) end)
+	if ok and c then table.insert(P.Conns, c); return c end
+	if not ok then print("[GardenProX] เชื่อม event ไม่ได้: " .. tostring(c)) end
+	return nil
+end
 local function hit(txt, words)
 	if not txt then return false end
 	txt = txt:lower()
@@ -519,7 +525,7 @@ local function setShown(v)
 	shown = v
 	root.Visible = v
 	reopen.Visible = not v
-	if v then pcall(function() uiScaleSafe() end) end
+	if v then pcall(function() if P.Fit then P.Fit() end end) end
 end
 
 reopen = cd("TextButton", { Size = UDim2.fromOffset(58, 58), Position = UDim2.fromOffset(14, 96),
@@ -551,17 +557,49 @@ root = cd("Frame", { Size = UDim2.fromOffset(620, 486), AnchorPoint = Vector2.ne
 corner(root, 14)
 cd("UIStroke", { Color = C.stroke, Thickness = 1, Parent = root })
 
+--------------------------------------------------------------------------------
+-- ปรับขนาด HUD ให้พอดีทุกจอ (auto-fit ตาม viewport จริง)
+--------------------------------------------------------------------------------
+local DESIGN = Vector2.new(620, 486)
+local scale = cd("UIScale", { Name = "HudScale", Parent = root })
+
+local function viewportSize()
+	local ok, s = pcall(function() return gui.AbsoluteSize end)
+	if ok and s and s.X and s.X > 0 and s.Y and s.Y > 0 then return s end
+	local cv = Workspace.CurrentCamera
+	if cv and cv.ViewportSize.X > 0 and cv.ViewportSize.Y > 0 then return cv.ViewportSize end
+	return Vector2.new(1280, 720)
+end
+
+local function fit()
+	local vp = viewportSize()
+	-- เว้นขอบ 20px กันชนขอบจอ/ติ่งมือถือ แล้วคูณขนาดที่ผู้ใช้ตั้งไว้
+	local base = math.min((vp.X - 20) / DESIGN.X, (vp.Y - 20) / DESIGN.Y)
+	local mul = tonumber(Cfg.UIScale) or 1
+	if mul <= 0 then mul = 1 end
+	scale.Scale = math.clamp(math.clamp(base, 0.30, 1.25) * mul, 0.24, 1.6)
+	root.Size = UDim2.fromOffset(DESIGN.X, DESIGN.Y)
+	root.AnchorPoint = Vector2.new(0.5, 0.5)
+	root.Position = UDim2.fromScale(0.5, 0.5)
+end
+P.Fit = fit
+pcall(fit)
+conn(gui:GetPropertyChangedSignal("AbsoluteSize"), function() task.wait(0.15); pcall(fit) end)
+local camFit = Workspace.CurrentCamera
+if camFit then conn(camFit:GetPropertyChangedSignal("ViewportSize"), function() task.wait(0.15); pcall(fit) end) end
+
 local bar = cd("Frame", { Size = UDim2.new(1, 0, 0, 56), BackgroundColor3 = C.card,
 	BorderSizePixel = 0, Parent = root })
 cd("Frame", { Size = UDim2.new(1, 0, 0, 2), Position = UDim2.new(0, 0, 1, -2),
 	BackgroundColor3 = C.accent, BorderSizePixel = 0, Parent = bar })
-cd("TextLabel", { Size = UDim2.fromOffset(300, 20), Position = UDim2.fromOffset(18, 9),
-	BackgroundTransparency = 1, Font = Enum.Font.GothamBlack, TextSize = 16, TextColor3 = C.text,
-	TextXAlignment = Enum.TextXAlignment.Left, Text = "GARDEN PRO X • v2.2", Parent = bar })
-local subBar = cd("TextLabel", { Size = UDim2.fromOffset(300, 16), Position = UDim2.fromOffset(18, 30),
-	BackgroundTransparency = 1, Font = Enum.Font.Gotham, TextSize = 11, TextColor3 = C.dim,
-	TextXAlignment = Enum.TextXAlignment.Left, Parent = bar,
-	Text = isMobile and "โหมดมือถือ • แตะ GP เพื่อซ่อน/เปิด" or "RightShift ซ่อน HUD" })
+cd("TextLabel", { Size = UDim2.fromOffset(232, 20), Position = UDim2.fromOffset(16, 8),
+	BackgroundTransparency = 1, Font = Enum.Font.GothamBlack, TextSize = 15, TextColor3 = C.text,
+	TextXAlignment = Enum.TextXAlignment.Left, TextTruncate = Enum.TextTruncate.AtEnd,
+	Text = "GARDEN PRO X • v2.3", Parent = bar })
+local subBar = cd("TextLabel", { Size = UDim2.fromOffset(232, 14), Position = UDim2.fromOffset(16, 30),
+	BackgroundTransparency = 1, Font = Enum.Font.Gotham, TextSize = 10.5, TextColor3 = C.dim,
+	TextXAlignment = Enum.TextXAlignment.Left, TextTruncate = Enum.TextTruncate.AtEnd, Parent = bar,
+	Text = isMobile and "แตะ GP ซ่อน/เปิด • ลากแถบนี้เพื่อย้าย" or "RightShift ซ่อน HUD" })
 
 -- สถิติบนหัว
 local function chip(x, w, label)
@@ -576,9 +614,9 @@ local function chip(x, w, label)
 		TextXAlignment = Enum.TextXAlignment.Left, Text = "--" })
 	return l, v
 end
-local moneyLbl = select(2, chip(322, 84, "เงิน"))
-local itemLbl = select(2, chip(412, 72, "เก็บได้"))
-local fpsLbl = select(2, chip(490, 62, "FPS/PING"))
+local moneyLbl = select(2, chip(256, 84, "เงิน"))
+local itemLbl = select(2, chip(344, 78, "เก็บได้"))
+local fpsLbl = select(2, chip(426, 92, "FPS/PING"))
 
 local function barBtn(txt, x, col)
 	local b = cd("TextButton", { Size = UDim2.fromOffset(26, 26), Position = UDim2.new(0, x, 0, 15),
@@ -619,6 +657,19 @@ local function switchTab(name, btn)
 	for n, b in pairs(P.Nav) do b.BackgroundColor3 = (n == name) and C.accent or C.card2 end
 	if btn then btn.BackgroundColor3 = C.accent end
 end
+
+-- ซ่อม HUD: คืนขนาด/ตำแหน่งให้พอดีจอ แล้วเปิดแท็บหลัก (เรียกได้ทุกเมื่อ)
+function P.RepairUI()
+	pcall(fit)
+	if root then
+		root.Visible = true
+		root.AnchorPoint = Vector2.new(0.5, 0.5)
+		root.Position = UDim2.fromScale(0.5, 0.5)
+	end
+	pcall(function() setShown(true) end)
+	pcall(function() switchTab("หลัก", P.Nav["หลัก"]) end)
+end
+function uiScaleSafe() P.RepairUI() end
 local function navBtn(name, icon)
 	local b = cd("TextButton", { Size = UDim2.new(1, 0, 0, 32), BackgroundColor3 = C.card2,
 		BorderSizePixel = 0, Font = Enum.Font.GothamBold, TextSize = 12.5, TextColor3 = C.text,
@@ -1270,9 +1321,11 @@ end)
 conn(UserInputService.JumpRequest, function()
 	if P.State.InfJump and alive() then local h = hum(); if h then h:ChangeState(Enum.HumanoidStateType.Jumping) end end
 end)
-conn(VirtualUser.Idled, function()
+-- VirtualUser ไม่มี event Idled (ของเดิมทำให้สคริปต์พังตั้งแต่บรรทัดนี้) -> ใช้ LP.Idled
+conn(LP.Idled, function()
 	if not P.State.AntiAfk then return end
-	VirtualUser:CaptureController(); VirtualUser:ClickButton2(Vector2.zero)
+	pcall(function() VirtualUser:CaptureController() end)
+	pcall(function() VirtualUser:ClickButton2(Vector2.zero) end)
 end)
 
 --------------------------------------------------------------------------------
@@ -1710,6 +1763,12 @@ renderWaypoints()
 --------------------------------------------------------------------------------
 head(pSet, "ซ่อม HUD")
 button(pSet, "⟳ ซ่อม UI ทันที (คืนตำแหน่ง/ขนาด)", function() P.RepairUI(); toast("ซ่อม UI แล้ว", "ok") end, C.blue)
+slider(pSet, "ขนาด UI", 60, 130, math.floor((Cfg.UIScale or 1) * 100), "%d%%", function(v)
+	Cfg.UIScale = v / 100
+	pcall(fit)
+	pcall(saveProfileSoon)
+end)
+note(pSet, "ขนาด UI 100% = พอดีจออัตโนมัติ • ถ้าตัวหนังสือเล็กไปเลื่อนเป็น 110-120% (อาจล้นจอเล็กน้อย) • หมุนจอ/เปลี่ยนความละเอียด ระบบปรับให้เอง")
 toggle(pSet, "ย้าย GUI ไป gethui (ถ้าโดน UI เกมทับ)", "UseGethui", function()
 	_G.GPX_USE_GETHUI = true
 	local ok, h = pcall(function() return gethui() end)
@@ -1824,39 +1883,28 @@ end)
 conn(UserInputService.InputChanged, function(i)
 	if dragging and (i.UserInputType == Enum.UserInputType.MouseMovement or i.UserInputType == Enum.UserInputType.Touch) then
 		local d = i.Position - from
-		root.Position = UDim2.new(startPos.X.Scale, startPos.X.Offset + d.X, startPos.Y.Scale, startPos.Y.Offset + d.Y)
+		local vp = viewportSize()
+		local half = Vector2.new(root.AbsoluteSize.X * 0.5, root.AbsoluteSize.Y * 0.5)
+		local function lim(v, h, total)
+			local lo, hi = h - total * 0.5, total * 0.5 - h
+			if hi < lo then lo, hi = hi, lo end
+			return math.clamp(v, lo, hi)
+		end
+		root.Position = UDim2.new(0.5, lim(startPos.X.Offset + d.X, half.X, vp.X), 0.5, lim(startPos.Y.Offset + d.Y, half.Y, vp.Y))
 	end
 end)
 conn(UserInputService.InputEnded, function(i)
 	if i.UserInputType == Enum.UserInputType.MouseButton1 or i.UserInputType == Enum.UserInputType.Touch then dragging = false end
 end)
 
-local scale = cd("UIScale", { Parent = root })
-local function fit()
-	local cam = Workspace.CurrentCamera
-	local vp = cam and cam.ViewportSize or Vector2.new(1280, 720)
-	local s = math.clamp(math.min(vp.X / 680, vp.Y / 580), 0.6, 1)
-	scale.Scale = s
-	root.Position = UDim2.fromScale(0.5, isMobile and 0.45 or 0.46)
-end
-fit()
-local cam = Workspace.CurrentCamera
-if cam then conn(cam:GetPropertyChangedSignal("ViewportSize"), function() task.wait(0.2) fit() end) end
-
--- ซ่อม UI: คืนตาแหน่ง/สเกล ถ้า HUD หายหรือค้าง
-function P.RepairUI()
-	setShown(true)
-	uiScaleSafe()
-end
-function uiScaleSafe()
-	pcall(fit)
-	root.Visible = true
-	root.Position = UDim2.fromScale(0.5, 0.46)
-	root.Size = UDim2.fromOffset(620, 486)
-	switchTab("หลัก", nMain)
-end
+-- fit/ซ่อม UI ถูกย้ายไปสร้างไว้ตั้งแต่ต้นไฟล์ (ทำงานได้แม้เนื้อหาแท็บสร้างไม่ครบ)
+pcall(fit)
 
 switchTab("หลัก", nMain)
+
+local tabCount = 0
+for _ in pairs(P.Pages) do tabCount += 1 end
+log(("HUD พร้อม • %d แท็บ • สเกล %.2f"):format(tabCount, scale.Scale))
 
 --------------------------------------------------------------------------------
 -- เก็บกวาด
@@ -1906,7 +1954,7 @@ task.spawn(function()
 	for _, r in ipairs(remotes) do if next(r.score) ~= nil then n += 1 end end
 	toast(("GardenPro X พร้อม • รีโมท %d • วัตถุ %d"):format(n, #W.list), "ok")
 	pcall(P.RepairUI)
-	log("เริ่มระบบ • v2.2 • เปิดทุกอย่างได้ที่แท็บ 'หลัก'")
+	log("เริ่มระบบ • v2.3 • เปิดทุกอย่างได้ที่แท็บ 'หลัก'")
 end)
 
 conn(Workspace.DescendantAdded, track)

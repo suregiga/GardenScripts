@@ -5,7 +5,7 @@
 ]]
 
 local NAME = "GardenPro X"
-local VER  = "2.2"
+local VER  = "2.3"
 local BASE = "https://raw.githubusercontent.com/suregiga/GardenScripts/main/"
 local FILES = {
 	BASE .. "GardenProX.lua?t=" .. tostring(os.time()),                              -- หลัก (กันแคช)
@@ -50,9 +50,18 @@ if not chunk then
 	return
 end
 
-local ok, runErr = pcall(chunk)
+local ok, runErr = xpcall(chunk, function(e)
+	return tostring(e) .. "\n" .. debug.traceback("", 2)
+end)
 if ok then
 	notify("พร้อมใช้งาน " .. VER .. " • กดปุ่ม GP หรือ RightShift")
 else
-	notify("รันแล้ว error: " .. tostring(runErr))
+	local first = tostring(runErr):match("^[^\n]*") or tostring(runErr)
+	print("[" .. NAME .. "] ERROR:\n" .. tostring(runErr))
+	notify("error: " .. first)
+	-- ถ้าสคริปต์ตายกลางทาง ให้ซ่อม HUD ที่สร้างค้างไว้ก่อน อย่างน้อยยังใช้งานได้
+	pcall(function()
+		local P = _G.GardenProX
+		if P and P.RepairUI then P.RepairUI() end
+	end)
 end
