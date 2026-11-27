@@ -5,7 +5,7 @@
 ]]
 
 local NAME = "GardenPro X"
-local VER  = "2.3"
+local VER  = "4.0"
 local BASE = "https://raw.githubusercontent.com/suregiga/GardenScripts/main/"
 local FILES = {
 	BASE .. "GardenProX.lua?t=" .. tostring(os.time()),                              -- หลัก (กันแคช)
@@ -23,11 +23,11 @@ local function notify(text)
 end
 
 if _G.GardenProX then
-	notify("สคริปต์โหลดอยู่แล้ว")
+	notify("สคริปต์โหลดอยู่แล้ว — กด RightShift หรือปุ่ม ☰")
 	return
 end
 
-notify("กำลังดาวน์โหลด " .. VER .. " ...")
+notify("กำลังดาวน์โหลด v" .. VER .. " ...")
 
 local source
 for _, url in ipairs(FILES) do
@@ -53,13 +53,17 @@ end
 local ok, runErr = xpcall(chunk, function(e)
 	return tostring(e) .. "\n" .. debug.traceback("", 2)
 end)
+
 if ok then
-	notify("พร้อมใช้งาน " .. VER .. " • กดปุ่ม GP หรือ RightShift")
+	local mode = "CLIENT ONLY"
+	pcall(function()
+		if _G.GardenProX and _G.GardenProX.HasServer then mode = "SERVER LINK" end
+	end)
+	notify("พร้อมใช้งาน v" .. VER .. " • " .. mode .. " • RightShift ซ่อน/แสดง")
 else
 	local first = tostring(runErr):match("^[^\n]*") or tostring(runErr)
 	print("[" .. NAME .. "] ERROR:\n" .. tostring(runErr))
 	notify("error: " .. first)
-	-- ถ้าสคริปต์ตายกลางทาง ให้ซ่อม HUD ที่สร้างค้างไว้ก่อน อย่างน้อยยังใช้งานได้
 	pcall(function()
 		local P = _G.GardenProX
 		if P and P.RepairUI then P.RepairUI() end
